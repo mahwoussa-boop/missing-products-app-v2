@@ -1,246 +1,261 @@
 """
-sovereign_matcher.py — محرك المطابقة السيادي لمتجر مهووس
-═══════════════════════════════════════════════════════════════
-v8.0 — الإصلاح النهائي الشامل (Anti-Crash + Threading)
-- معالجة الانهيار (ValueError: empty vocabulary).
-- حماية فولاذية للبيانات الفارغة أو الملفات التي لا تحتوي على أسماء.
-- دعم المهام في الخلفية (Threading) لضمان عمل شريط التقدم بدون تجميد الواجهة.
+app.py v9.0 — الواجهة الذكية المتفاعلة (تصميم سليم، فلاتر، وتحكم جماعي)
+══════════════════════════════════════════════════════════════════════
+- حل مشكلة الشاشة السوداء (استخدام Native Streamlit Containers).
+- تقسيم ذكي للواجهة: (مفقود بدون مقارنة | مشتبه ومتطابق مع مقارنة بصرية).
+- دعم التحديد الجماعي (Bulk Actions) والفلاتر.
 """
 
-import re
-import json
-import asyncio
-import pandas as pd
 import streamlit as st
-import google.generativeai as genai
-from rapidfuzz import fuzz
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-from typing import List, Dict, Any, Tuple, Optional
-from datetime import datetime
-import threading
-from streamlit.runtime.scriptrunner import add_script_run_ctx
+import pandas as pd
+import asyncio
+import time
 
-from config import GEMINI_API_KEY, SYNONYMS, REJECT_KEYWORDS, TESTER_KEYWORDS, SET_KEYWORDS
+from config import APP_TITLE, APP_VERSION, APP_ICON
+from db_manager import load_mahwous_store_data, load_competitor_data
+from sovereign_matcher import start_sovereign_analysis, ai_verify_match
+from make_sender import send_products_to_make
 
-# إعداد Gemini
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+# استيراد أدوات الذكاء الاصطناعي
+from ai_engine import (
+    fetch_product_images, 
+    fetch_fragrantica_info, 
+    generate_mahwous_description, 
+    search_market_price, 
+    search_mahwous
+)
 
-class SovereignMatcher:
-    def __init__(self, mahwous_df: pd.DataFrame):
-        self.mahwous_df = mahwous_df
+# 1. إعدادات الصفحة (يجب أن تكون في السطر الأول)
+st.set_page_config(page_title=f"{APP_TITLE} {APP_VERSION}", page_icon=APP_ICON, layout="wide")
+
+# 2. تهيئة Session State الأساسية
+if 'analysis_running' not in st.session_state: st.session_state.analysis_running = False
+if 'processed_count' not in st.session_state: st.session_state.processed_count = 0
+if 'total_count' not in st.session_state: st.session_state.total_count = 0
+if 'analysis_results' not in st.session_state: st.session_state.analysis_results = []
+if 'ignore_list' not in st.session_state: st.session_state.ignore_list = set()
+if 'needs_rerun' not in st.session_state: st.session_state.needs_rerun = False
+if 'ai_verifications' not in st.session_state: st.session_state.ai_verifications = {}
+if 'selected_products' not in st.session_state: st.session_state.selected_products = set()
+
+# CSS خفيف جداً لترتيب العناصر بدون التأثير على الوضع الليلي
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;700&display=swap');
+    html, body, [class*="st-"] { font-family: 'Cairo', sans-serif; }
+    .stApp { direction: rtl; }
+    .product-card { border: 1px solid #444; border-radius: 10px; padding: 15px; margin-bottom: 15px; background-color: rgba(255,255,255,0.02); }
+    .price-text { color: #00d2ff; font-weight: bold; font-size: 1.2rem; }
+    .badge-green { color: #28a745; font-weight: bold; }
+    .badge-yellow { color: #ffc107; font-weight: bold; }
+    .badge-red { color: #dc3545; font-weight: bold; }
+</style>
+""", unsafe_allow_html=True)
+
+def main():
+    st.title(f"{APP_ICON} {APP_TITLE} (النسخة 9.0)")
+    st.markdown("محرك المطابقة السيادي وخبير المنتجات المفقودة")
+
+    # ─── الشريط الجانبي (إدارة البيانات) ───
+    with st.sidebar:
+        st.header("📂 رفع البيانات")
+        mahwous_file = st.file_uploader("ملف متجر مهووس (المرجع)", type=["csv"])
+        competitor_files = st.file_uploader("ملفات المنافسين", type=["csv"], accept_multiple_files=True)
         
-        # حماية ضد الملفات الفارغة تماماً
-        if self.mahwous_df.empty:
-            self.mah_processed = pd.DataFrame(columns=['product_name', 'clean_name', 'category', 'brand', 'size'])
-            self.vectorizer = TfidfVectorizer(ngram_range=(1, 3), analyzer='char_wb')
-            self.tfidf_matrix = self.vectorizer.fit_transform(["منتج_بديل_فارغ"])
+        if st.button("🚀 بدء التحليل", type="primary", use_container_width=True, disabled=st.session_state.analysis_running):
+            if mahwous_file and competitor_files:
+                st.session_state.analysis_running = True
+                with st.spinner("جاري تهيئة البيانات..."):
+                    m_df = load_mahwous_store_data(mahwous_file)
+                    c_data = {f.name: load_competitor_data(f) for f in competitor_files}
+                    start_sovereign_analysis(m_df, c_data)
+                st.rerun()
+            else:
+                st.error("الرجاء رفع الملفات أولاً.")
+        
+        if st.session_state.analysis_running:
+            if st.button("🛑 إيقاف فوري", use_container_width=True):
+                st.session_state.analysis_running = False
+                st.rerun()
+
+    # ─── شريط التقدم اللحظي ───
+    progress_container = st.empty()
+    if st.session_state.analysis_running:
+        if st.session_state.total_count > 0:
+            progress = min(st.session_state.processed_count / st.session_state.total_count, 1.0)
+            progress_container.progress(progress, text=f"🚀 جاري الفحص: {st.session_state.processed_count} من {st.session_state.total_count}...")
+            time.sleep(0.5)
+            st.rerun()
+
+    if st.session_state.needs_rerun:
+        st.session_state.needs_rerun = False
+        st.rerun()
+
+    # ─── لوحة النتائج الرئيسية ───
+    if not st.session_state.analysis_running and st.session_state.analysis_results:
+        df = pd.DataFrame(st.session_state.analysis_results)
+        df = df[~df['product_name'].isin(st.session_state.ignore_list)]
+        
+        if df.empty:
+            st.info("لا توجد بيانات لعرضها. جميع المنتجات تمت معالجتها أو تجاهلها.")
             return
 
-        self.mah_processed = self._preprocess_df(mahwous_df)
-        self.vectorizer = TfidfVectorizer(ngram_range=(1, 3), analyzer='char_wb')
-        
-        # حماية المحرك من الانهيار (ValueError) باستخدام Try-Except
-        try:
-            self.tfidf_matrix = self.vectorizer.fit_transform(self.mah_processed['clean_name'])
-        except ValueError:
-            # خطة طوارئ: إذا فشل المحرك، نقوم بتعبئة العمود بقيمة افتراضية لمنع توقف التطبيق
-            self.mah_processed['clean_name'] = 'منتج_بدون_اسم_معروف'
-            self.tfidf_matrix = self.vectorizer.fit_transform(self.mah_processed['clean_name'])
-
-    def _preprocess_df(self, df: pd.DataFrame) -> pd.DataFrame:
-        """تحليل ومعالجة مسبقة لبيانات المتجر لاستخراج الخصائص الحرجة."""
-        processed = df.copy()
-        
-        # التأكد من وجود عمود الاسم لتفادي أخطاء المفاتيح
-        if 'product_name' not in processed.columns:
-            processed['product_name'] = 'منتج_بدون_اسم'
+        # فلاتر علوية
+        c1, c2, c3 = st.columns(3)
+        with c1: search_query = st.text_input("🔍 بحث برقم أو اسم المنتج...")
+        with c2: 
+            all_comps = ["الكل"] + list(set(comp.strip() for comps in df['competitor_name'].dropna() for comp in str(comps).split('،')))
+            selected_comp = st.selectbox("🏬 فلترة حسب المنافس", all_comps)
             
-        processed['clean_name'] = processed['product_name'].astype(str).apply(self.normalize_text)
-        
-        # --- الإصلاح الجذري لمعالجة النصوص الفارغة ---
-        # استبدال أي نص فارغ تماماً أو مسافات بكلمة آمنة
-        processed['clean_name'] = processed['clean_name'].replace(r'^\s*$', 'منتج_بدون_اسم', regex=True)
-        processed['clean_name'] = processed['clean_name'].fillna('منتج_بدون_اسم')
-        
-        # التأكد النهائي: لو أصبحت كل القيم فارغة بعد الاستبدال
-        if processed['clean_name'].str.strip().eq('').all():
-            processed['clean_name'] = 'منتج_بدون_اسم'
+        # تطبيق الفلاتر
+        if search_query:
+            df = df[df['product_name'].str.contains(search_query, case=False, na=False)]
+        if selected_comp != "الكل":
+            df = df[df['competitor_name'].str.contains(selected_comp, case=False, na=False)]
+
+        # تقسيم التبويبات
+        tab_green, tab_yellow, tab_red = st.tabs([
+            f"🟢 مفقود أكيد ({len(df[df['confidence_level'] == 'green'])})", 
+            f"🟡 مشتبه به ({len(df[df['confidence_level'] == 'yellow'])})", 
+            f"🔴 متطابق ({len(df[df['confidence_level'] == 'red'])})"
+        ])
+
+        # =========================================================
+        # القسم الأخضر: مفقود أكيد (بدون مقارنة - تفاصيل المنافس فقط)
+        # =========================================================
+        with tab_green:
+            df_green = df[df['confidence_level'] == 'green']
             
-        processed['category'] = processed['clean_name'].apply(self.detect_category)
-        processed['brand'] = processed['product_name'].astype(str).apply(self.extract_brand)
-        processed['size'] = processed['product_name'].astype(str).apply(self.extract_size)
-        return processed
-
-    @staticmethod
-    def normalize_text(text: str) -> str:
-        """تنظيف وتوحيد النصوص العربية والإنجليزية."""
-        if not text or pd.isna(text): return "منتج_بدون_اسم"
-        text = str(text).lower().strip()
-        for word, syn in SYNONYMS.items():
-            text = text.replace(word, syn)
-        text = re.sub("[إأآا]", "ا", text)
-        text = re.sub("ة", "ه", text)
-        text = re.sub("ى", "ي", text)
-        text = re.sub(r"[\u064B-\u0652]", "", text)
-        text = re.sub(r"[^\w\s]", " ", text)
-        cleaned = " ".join(text.split())
-        return cleaned if cleaned else "منتج_بدون_اسم"
-
-    @staticmethod
-    def detect_category(text: str) -> str:
-        """تحديد فئة المنتج لمنع الخلط."""
-        if any(k in text for k in ['عطر', 'perfume', 'edp', 'edt', 'parfum', 'كولونيا']): return 'perfume'
-        if any(k in text for k in ['روج', 'شفاه', 'مكياج', 'makeup', 'خدود', 'بلشر', 'هايلايتر', 'ماسكارا', 'بودره', 'ايلاينر']): return 'makeup'
-        if any(k in text for k in ['لوشن', 'مرطب', 'جسم', 'body', 'lotion', 'كريم', 'شاور']): return 'skincare'
-        return 'other'
-
-    @staticmethod
-    def extract_brand(name: str) -> str:
-        """محاولة استخراج الماركة من الاسم."""
-        name_lower = name.lower()
-        for syn, brand in SYNONYMS.items():
-            if syn in name_lower: return brand
-        return "unknown"
-
-    @staticmethod
-    def extract_size(name: str) -> str:
-        """استخراج الحجم (مثلاً 100ml)."""
-        match = re.search(r'(\d+)\s*(ml|مل|لتر|l)', name.lower())
-        return match.group(0) if match else "unknown"
-
-    def find_best_match(self, comp_name: str) -> Dict[str, Any]:
-        """البحث عن أفضل مطابقة باستخدام خوارزمية سيادية هجينة."""
-        if self.mahwous_df.empty:
-            return {"status": "Confirmed Missing", "confidence_level": "green", "match_name": "", "match_image": "", "match_price": 0, "match_score": 0}
-
-        clean_comp = self.normalize_text(comp_name)
-        cat_comp = self.detect_category(clean_comp)
-        brand_comp = self.extract_brand(comp_name)
-        size_comp = self.extract_size(comp_name)
-
-        potential_indices = self.mah_processed[self.mah_processed['category'] == cat_comp].index
-        if len(potential_indices) == 0:
-            potential_indices = self.mah_processed.index
-
-        if not clean_comp.strip():
-            clean_comp = 'منتج_بدون_اسم'
-
-        try:
-            comp_vec = self.vectorizer.transform([clean_comp])
-            cosine_sims = cosine_similarity(comp_vec, self.tfidf_matrix).flatten()
-        except ValueError:
-            cosine_sims = [0] * len(self.mah_processed)
-        
-        best_idx = -1
-        best_score = 0
-        
-        for idx in potential_indices:
-            f_score = fuzz.token_set_ratio(clean_comp, self.mah_processed.at[idx, 'clean_name'])
-            combined_score = (cosine_sims[idx] * 40) + (f_score * 0.6)
+            if not df_green.empty:
+                # زر إرسال جماعي
+                if st.button("🚀 إرسال المنتجات المحددة إلى Make", type="primary"):
+                    selected = [row for _, row in df_green.iterrows() if row['product_name'] in st.session_state.selected_products]
+                    if selected:
+                        with st.spinner("جاري توليد الوصف والإرسال..."):
+                            payloads = []
+                            for row in selected:
+                                p_dict = row.to_dict()
+                                # توليد الوصف تلقائياً عند الإرسال
+                                p_dict['description'] = generate_mahwous_description(row['product_name'], row['price'])
+                                payloads.append(p_dict)
+                            res = send_products_to_make(payloads)
+                            if res['success']: st.success(res['message'])
+                            else: st.error(res['message'])
+                    else:
+                        st.warning("الرجاء تحديد منتج واحد على الأقل.")
             
-            if brand_comp != "unknown" and brand_comp == self.mah_processed.at[idx, 'brand']:
-                combined_score += 10
-            if size_comp != "unknown" and size_comp == self.mah_processed.at[idx, 'size']:
-                combined_score += 5
-
-            if combined_score > best_score:
-                best_score = combined_score
-                best_idx = idx
-
-        status = "Confirmed Missing"
-        confidence = "green"
-        match_info = {}
-
-        if best_idx != -1:
-            match_row = self.mahwous_df.iloc[best_idx]
-            match_info = {
-                "match_name": match_row.get('product_name', ''),
-                "match_image": match_row.get('image_url', ''),
-                "match_price": match_row.get('price', 0),
-                "match_score": best_score
-            }
-            
-            if best_score > 90:
-                status = "Exact Duplicate"
-                confidence = "red"
-            elif best_score > 55:
-                status = "Potential Match"
-                confidence = "yellow"
-
-        return {
-            "status": status,
-            "confidence_level": confidence,
-            **match_info
-        }
-
-async def ai_verify_match(comp_name: str, match_name: str) -> Dict:
-    """التحقق الذكي عبر Gemini 2.0 لضمان دقة 100%."""
-    if not GEMINI_API_KEY: return {"is_match": False, "reason": "No API Key"}
-    
-    prompt = f"""
-    قارن بين هذين المنتجين بدقة متناهية:
-    المنتج 1 (المنافس): {comp_name}
-    المنتج 2 (متجرنا): {match_name}
-
-    القواعد:
-    - إذا كان أحدهما عطر والآخر (لوشن، زيت، بخاخ شعر، أو تستر)، فهما مختلفان (is_match: false).
-    - إذا اختلف الحجم (مثلاً 50 مل مقابل 100 مل)، فهما مختلفان.
-    - إذا اختلف التركيز (EDP مقابل EDT)، فهما مختلفان.
-
-    أجب بصيغة JSON:
-    {{"is_match": true/false, "reason": "شرح موجز بالعربية"}}
-    """
-    try:
-        model = genai.GenerativeModel('gemini-2.0-flash')
-        response = await asyncio.to_thread(model.generate_content, prompt)
-        return json.loads(re.sub(r'```json\s*|\s*```', '', response.text).strip())
-    except:
-        return {"is_match": False, "reason": "AI Error"}
-
-def _run_analysis_thread(mahwous_df, competitor_data, matcher):
-    """دالة مساعدة تعمل في الخلفية لتنفيذ التحليل دون تجميد الواجهة"""
-    results = []
-    for comp_file, df in competitor_data.items():
-        if df.empty: continue
-        
-        for _, row in df.iterrows():
-            if not st.session_state.analysis_running: 
-                break # التوقف الفوري إذا طلب المستخدم
-            
-            prod_name = str(row.get('product_name', 'منتج_غير_معروف'))
-            match_res = matcher.find_best_match(prod_name)
-            
-            results.append({**row.to_dict(), "competitor_name": comp_file, **match_res})
-            
-            # تحديث العداد
-            st.session_state.processed_count += 1
-            
-            # تحديث النتائج المؤقتة كل 10 منتجات لتسريع الواجهة
-            if st.session_state.processed_count % 10 == 0:
-                st.session_state.analysis_results = results
+            for idx, row in df_green.iterrows():
+                p_name = row['product_name']
+                p_price = row['price']
                 
-    st.session_state.analysis_results = results
-    st.session_state.analysis_running = False
-    st.session_state.needs_rerun = True
+                with st.container(border=True):
+                    col_chk, col_img, col_info = st.columns([0.5, 2, 7])
+                    
+                    with col_chk:
+                        is_selected = st.checkbox("تحديد", key=f"chk_{idx}", value=p_name in st.session_state.selected_products)
+                        if is_selected: st.session_state.selected_products.add(p_name)
+                        elif p_name in st.session_state.selected_products: st.session_state.selected_products.remove(p_name)
+                        
+                    with col_img:
+                        img_url = st.session_state.get(f"img_{idx}", row.get('image_url', ''))
+                        if img_url: st.image(img_url, use_container_width=True)
+                        else: st.write("📷 لا توجد صورة")
+                        
+                    with col_info:
+                        st.subheader(p_name)
+                        st.markdown(f"<span class='price-text'>{p_price} ر.س</span>", unsafe_allow_html=True)
+                        st.write(f"🏢 **متوفر لدى:** {row.get('competitor_name', 'غير محدد')}")
+                        
+                        # أزرار الذكاء الاصطناعي السفلية
+                        btn_cols = st.columns(6)
+                        if btn_cols[0].button("🖼️ جلب صورة", key=f"btn_img_{idx}"):
+                            with st.spinner(".."):
+                                res = fetch_product_images(p_name)
+                                if res['success'] and res['images']:
+                                    st.session_state[f"img_{idx}"] = res['images'][0]['url']
+                                    st.rerun()
+                        if btn_cols[1].button("🌸 مكونات", key=f"btn_not_{idx}"):
+                            with st.spinner(".."):
+                                res = fetch_fragrantica_info(p_name)
+                                if res['success']: st.info(f"القمة: {', '.join(res.get('top_notes', []))}")
+                        if btn_cols[2].button("🔎 هل متوفر لدينا؟", key=f"btn_chk_{idx}"):
+                            with st.spinner(".."):
+                                res = search_mahwous(p_name)
+                                if res['success']: st.info(f"النتيجة: {res.get('likely_available')}")
+                        if btn_cols[3].button("💹 تسعيرة السوق", key=f"btn_mkt_{idx}"):
+                            with st.spinner(".."):
+                                res = search_market_price(p_name, p_price)
+                                if res['success']: st.info(f"متوسط السوق: {res.get('market_price')} ر.س")
+                        if btn_cols[4].button("✍️ وصف يدوي", key=f"btn_dsc_{idx}"):
+                            with st.spinner(".."):
+                                desc = generate_mahwous_description(p_name, p_price)
+                                st.session_state[f"desc_{idx}"] = desc
+                        if btn_cols[5].button("🗑️ تجاهل", key=f"btn_ign_{idx}"):
+                            st.session_state.ignore_list.add(p_name)
+                            st.rerun()
+                            
+                        # إظهار الوصف للتعديل إن وجد
+                        if f"desc_{idx}" in st.session_state:
+                            st.text_area("وصف مهووس", value=st.session_state[f"desc_{idx}"], height=150, key=f"ta_{idx}")
 
-def start_sovereign_analysis(mahwous_df, competitor_data):
-    """بدء عملية التحليل السيادي (تعمل الآن في الخلفية لتفعيل شريط التقدم)."""
-    try:
-        matcher = SovereignMatcher(mahwous_df)
-    except Exception as e:
-        st.error(f"حدث خطأ غير متوقع أثناء تهيئة المحرك: {e}")
-        st.session_state.analysis_running = False
-        return
+        # =========================================================
+        # دالة مساعدة لطباعة الأقسام (الأصفر والأحمر) بمقارنة بصرية
+        # =========================================================
+        def render_comparison_section(level_name):
+            df_filtered = df[df['confidence_level'] == level_name]
+            for idx, row in df_filtered.iterrows():
+                p_name = row['product_name']
+                with st.container(border=True):
+                    comp_col, mahwous_col = st.columns(2)
+                    
+                    # بطاقة المنافس
+                    with comp_col:
+                        st.caption(f"🛒 منتج المنافس ({row.get('competitor_name')})")
+                        if row.get('image_url'): st.image(row['image_url'], width=120)
+                        st.write(f"**{p_name}**")
+                        st.markdown(f"<span class='price-text'>{row['price']} ر.س</span>", unsafe_allow_html=True)
 
-    total = sum(len(df) for df in competitor_data.values())
-    st.session_state.total_count = total
-    st.session_state.processed_count = 0
-    st.session_state.analysis_results = []
-    st.session_state.analysis_running = True
+                    # بطاقة متجر مهووس (للمقارنة)
+                    with mahwous_col:
+                        st.caption("📦 أقرب منتج في مهووس")
+                        if row.get('match_image'): st.image(row['match_image'], width=120)
+                        st.write(f"**{row.get('match_name')}**")
+                        st.markdown(f"<span class='price-text'>{row.get('match_price', 0)} ر.س</span>", unsafe_allow_html=True)
+                        st.markdown(f"نسبة التطابق: **{row.get('match_score', 0)}%**")
 
-    # تشغيل التحليل في Thread منفصل لكي لا تتجمد شاشة Streamlit
-    thread = threading.Thread(target=_run_analysis_thread, args=(mahwous_df, competitor_data, matcher))
-    add_script_run_ctx(thread) # ضروري لكي يتمكن الـ thread من تعديل session_state
-    thread.start()
+                    # أزرار الإجراءات
+                    b_cols = st.columns(4)
+                    
+                    key_ai = f"ai_res_{idx}"
+                    if key_ai in st.session_state:
+                        st.info(f"💡 الذكاء الاصطناعي: {st.session_state[key_ai]['reason']}")
+
+                    if b_cols[0].button("🤖 تحقق بالذكاء", key=f"btn_ai_{idx}"):
+                        with st.spinner(".."):
+                            res = asyncio.run(ai_verify_match(p_name, row.get('match_name', '')))
+                            st.session_state[key_ai] = res
+                            st.rerun()
+                            
+                    if b_cols[1].button("✅ إضافة لمهووس (ميك)", key=f"btn_add_{idx}", type="primary"):
+                        with st.spinner(".."):
+                            p_dict = row.to_dict()
+                            p_dict['description'] = generate_mahwous_description(p_name, row['price'])
+                            res = send_products_to_make([p_dict])
+                            if res['success']: st.toast("تم الإرسال!", icon="✅")
+                            else: st.error("فشل الإرسال")
+                            
+                    if b_cols[2].button("💹 تسعيرة", key=f"btn_prc_{idx}"):
+                        with st.spinner(".."):
+                            res = search_market_price(p_name, row['price'])
+                            if res['success']: st.info(f"متوسط السوق: {res.get('market_price')} ر.س")
+                            
+                    if b_cols[3].button("🗑️ تجاهل", key=f"btn_del_{idx}"):
+                        st.session_state.ignore_list.add(p_name)
+                        st.rerun()
+
+        # تشغيل الأقسام
+        with tab_yellow: render_comparison_section('yellow')
+        with tab_red: render_comparison_section('red')
+
+if __name__ == "__main__":
+    main()
