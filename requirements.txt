@@ -5,5 +5,5 @@ requests>=2.31.0
 openpyxl>=3.1.0
 scikit-learn
 aiohttp
-asyncio
 google-generativeai
+plotly>=5.15.0
