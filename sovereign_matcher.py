@@ -1,233 +1,288 @@
 """
-sovereign_matcher.py — محرك المطابقة السيادي (النسخة الصارمة V11.0)
-═══════════════════════════════════════════════════════════════
-- استبعاد العينات (أقل من 15 ريال أو 10 مل).
-- قانون التستر الصارم (التستر لا يقارن إلا بتستر).
-- عقوبات (Penalties) قاسية لاختلاف الماركة بوضوح.
-- إعادة توزيع نسب الأقسام لتقليل أخطاء "تتطلب مراجعة".
+sovereign_matcher.py v12.0 — محرك المطابقة السيادي (صارم جداً وذكي)
+══════════════════════════════════════════════════════════════════════
+- عزل التسترات: لا يتم مقارنة التستر إلا بالتستر.
+- عزل الأحجام والتركيز: عقوبات صارمة جداً (تصل إلى تصفير النسبة) عند اختلاف الحجم أو النوع.
+- إزالة العينات: تجاهل تام لأي منتج حجمه أقل من 10 مل أو سعره أقل من 15 ريال.
+- تحسين خوارزمية المطابقة: معاقبة شديدة لاختلاف الكلمات الأساسية لمنع مطابقة عطور مختلفة لنفس الماركة.
 """
 
+import pandas as pd
 import re
 import json
 import asyncio
-import pandas as pd
-import streamlit as st
-import google.generativeai as genai
-from rapidfuzz import fuzz
+import threading
+from rapidfuzz import fuzz, process
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from typing import Dict, Any
-import threading
-from streamlit.runtime.scriptrunner import add_script_run_ctx
+from typing import Dict, Tuple, Optional, List, Any
+import streamlit as st
+import google.generativeai as genai
+from config import GEMINI_API_KEY
 
-from config import GEMINI_API_KEY, SYNONYMS
+def normalize_product_name(text: str) -> str:
+    """تنظيف وتوحيد اسم المنتج بصرامة عالية."""
+    if not isinstance(text, str) or pd.isna(text):
+        return ""
+    
+    text = text.lower()
+    text = re.sub(r'[^\w\s]', ' ', text)
+    
+    # توحيد الأرقام والكلمات الملتصقة (مثل 100ml إلى 100 ml)
+    text = re.sub(r'(\d+)\s*(ml|مل|ملل|g|غرام|oz)', r'\1 \2', text)
+    
+    # الكلمات التسويقية والوصفية التي تسبب تشويشاً يجب إزالتها لكي نركز على اسم العطر الفعلي
+    stop_words = [
+        r'\btester\b', r'\bتستر\b', r'\bedp\b', r'\bedt\b', r'\bedc\b',
+        r'\beau de parfum\b', r'\beau de toilette\b', r'\bparfum\b', r'\bcologne\b',
+        r'\bml\b', r'\bمل\b', r'\bللجنسين\b', r'\bللرجال\b', r'\بللنساء\b', 
+        r'\bmen\b', r'\bwomen\b', r'\bunisex\b', r'\bعطر\b', r'\bعينة\b',
+        r'\bبدون كرتون\b', r'\bبدون غطاء\b', r'\bاصدار محدود\b', r'\bحصري\b',
+        r'\bطقم\b', r'\bمجموعة\b', r'\bset\b', r'\bgift\b', r'\bهدايا\b'
+    ]
+    for word in stop_words:
+        text = re.sub(word, ' ', text)
+    
+    return " ".join(text.split())
 
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+def extract_attributes(name: str) -> Dict[str, Any]:
+    """استخراج السمات الأساسية بذكاء عالي لمنع خلط المنتجات المختلفة."""
+    attrs = {
+        "size_num": None, 
+        "concentration": "unknown", 
+        "is_tester": False, 
+        "is_sample": False,
+        "is_set": False
+    }
+    if not isinstance(name, str) or pd.isna(name): return attrs
+    
+    name_lower = name.lower()
+    
+    # 1. كشف التستر بصرامة (في بداية أو نهاية الاسم أو وصف)
+    if any(k in name_lower for k in ["تستر", "tester", "بدون غطاء", "بدون كرتون", "(تستر)"]):
+        attrs["is_tester"] = True
+        
+    # 2. كشف الطقم/المجموعة
+    if any(k in name_lower for k in ["طقم", "مجموعة", "set", "gift", "هدايا"]):
+        attrs["is_set"] = True
+
+    # 3. كشف الحجم والعينات
+    size_match = re.search(r'(\d+)\s*(ml|مل|ملل|g|غرام|جرام)', name_lower)
+    if size_match:
+        try:
+            num = float(size_match.group(1))
+            attrs["size_num"] = num
+            # تصنيف كعينة إذا كان أقل من 10 مل
+            if num < 10:
+                attrs["is_sample"] = True
+        except ValueError: 
+            pass
+        
+    # 4. كشف التركيز والنوع بشكل دقيق
+    if any(k in name_lower for k in ["edp", "parfum", "بارفيوم", "بيرفيوم", "برفيوم", "إكستريت", "extrait"]):
+        attrs["concentration"] = "edp"
+    elif any(k in name_lower for k in ["edt", "toilette", "تواليت"]):
+        attrs["concentration"] = "edt"
+    elif any(k in name_lower for k in ["edc", "cologne", "كولونيا", "كولون"]):
+        attrs["concentration"] = "edc"
+    elif any(k in name_lower for k in ["hair mist", "عطر شعر", "للشعر", "معطر شعر"]):
+         attrs["concentration"] = "hair_mist"
+    elif any(k in name_lower for k in ["spray", "سبراي", "مزيل عرق", "deodorant", "ديودرنت", "رول اون"]):
+         attrs["concentration"] = "deodorant"
+    elif any(k in name_lower for k in ["lotion", "لوشن", "مرطب", "كريم", "cream"]):
+         attrs["concentration"] = "lotion"
+    elif any(k in name_lower for k in ["جهاز", "الة", "آلة", "موزع", "فواحة"]):
+         attrs["concentration"] = "device"
+        
+    return attrs
 
 class SovereignMatcher:
     def __init__(self, mahwous_df: pd.DataFrame):
-        # 1. فلترة متجرنا أولاً (استبعاد العينات الصغيرة والرخيصة)
-        self.mahwous_df = self._filter_samples(mahwous_df)
+        self.mahwous_df = mahwous_df.copy()
+        if not self.mahwous_df.empty:
+            if 'normalized_name' not in self.mahwous_df.columns:
+                self.mahwous_df['normalized_name'] = self.mahwous_df['product_name'].astype(str).apply(normalize_product_name)
+            
+            # استخراج سمات منتجاتنا مسبقاً لتسريع المقارنة
+            self.mahwous_df['attrs'] = self.mahwous_df['product_name'].astype(str).apply(extract_attributes)
+            
+            self.mahwous_names = self.mahwous_df['normalized_name'].tolist()
+            self.vectorizer = TfidfVectorizer(analyzer='char_wb', ngram_range=(3, 5))
+            self.tfidf_matrix = self.vectorizer.fit_transform(self.mahwous_names)
+        else:
+            self.mahwous_names = []
+
+    def get_best_match(self, competitor_name: str, comp_attrs: Dict[str, Any]) -> Tuple[Optional[pd.Series], float]:
+        if not self.mahwous_names:
+            return None, 0.0
+            
+        norm_name = normalize_product_name(competitor_name)
         
-        if self.mahwous_df.empty:
-            self.mah_processed = pd.DataFrame(columns=['product_name', 'clean_name', 'category', 'brand', 'size', 'is_tester'])
-            self.vectorizer = TfidfVectorizer(ngram_range=(1, 3), analyzer='char_wb')
-            self.tfidf_matrix = self.vectorizer.fit_transform(["فارغ"])
+        # إذا كان الاسم المنظف فارغاً (مثلاً كان مجرد أرقام وحجم)، لا تبحث
+        if not norm_name.strip():
+            return None, 0.0
+
+        query_vec = self.vectorizer.transform([norm_name])
+        cosine_sim = cosine_similarity(query_vec, self.tfidf_matrix).flatten()
+        
+        # جلب أفضل المرشحين بناءً على TF-IDF
+        top_indices = cosine_sim.argsort()[-20:][::-1]
+        
+        best_final_score = 0
+        best_match_idx = -1
+        
+        for idx in top_indices:
+            mahwous_name = self.mahwous_names[idx]
+            mahwous_row = self.mahwous_df.iloc[idx]
+            mahwous_attrs = mahwous_row['attrs']
+            
+            # حساب نسبة التشابه الأساسية (Fuzzy)
+            # نستخدم token_sort_ratio ليعاقب اختلاف ترتيب الكلمات والكلمات المفقودة/الزائدة
+            score_sort = fuzz.token_sort_ratio(norm_name, mahwous_name)
+            score_set = fuzz.token_set_ratio(norm_name, mahwous_name)
+            fuzz_score = (score_sort * 0.8) + (score_set * 0.2)
+            
+            # ---------- القواعد السيادية الصارمة ---------- #
+            
+            # 1. قاعدة التستر: التستر يطابق تستر فقط.
+            if comp_attrs["is_tester"] != mahwous_attrs["is_tester"]:
+                fuzz_score *= 0.1  # تدمير النسبة
+                
+            # 2. قاعدة الأطقم: الطقم يطابق طقماً
+            if comp_attrs["is_set"] != mahwous_attrs["is_set"]:
+                fuzz_score *= 0.3
+                
+            # 3. قاعدة الحجم
+            if comp_attrs["size_num"] is not None and mahwous_attrs["size_num"] is not None:
+                if comp_attrs["size_num"] != mahwous_attrs["size_num"]:
+                    fuzz_score *= 0.1  # تدمير النسبة (50مل ليس 100مل)
+            
+            # 4. قاعدة التركيز والنوع (عطر، لوشن، جهاز، إلخ)
+            if comp_attrs["concentration"] != "unknown" and mahwous_attrs["concentration"] != "unknown":
+                if comp_attrs["concentration"] != mahwous_attrs["concentration"]:
+                    fuzz_score *= 0.2  # تدمير النسبة
+
+            # ------------------------------------------------ #
+
+            if fuzz_score > best_final_score:
+                best_final_score = fuzz_score
+                best_match_idx = idx
+                
+        if best_match_idx != -1:
+            return self.mahwous_df.iloc[best_match_idx], round(best_final_score, 1)
+        return None, 0.0
+
+def process_item_pipeline(row: Dict, matcher: SovereignMatcher) -> Optional[Dict]:
+    """معالجة منتج واحد من المنافس وتصنيفه."""
+    product_name = str(row.get('product_name', ''))
+    if not product_name or product_name == 'nan': return None
+    
+    # 1. فلتر السعر (تجاهل أقل من 15 ريال)
+    try:
+        price_val = float(str(row.get('price', '0')).replace(',', ''))
+        if price_val < 15.0: return None
+    except ValueError:
+        pass 
+        
+    comp_attrs = extract_attributes(product_name)
+    
+    # 2. فلتر العينات (تجاهل أقل من 10 مل)
+    if comp_attrs["is_sample"]: return None
+        
+    match_row, score = matcher.get_best_match(product_name, comp_attrs)
+    
+    # عتبات التصنيف الدقيقة جداً:
+    # > 85 : متطابق
+    # 50 - 85 : مراجعة
+    # < 50 : مفقود أكيد
+    if score >= 85:
+        status = "red"
+    elif score >= 50:
+        status = "yellow"
+    else:
+        status = "green"
+        
+    return {
+        "product_name": product_name,
+        "price": row.get('price', 0.0),
+        "image_url": row.get('image_url', ''),
+        "competitor_name": row.get('competitor_name', ''),
+        "confidence_level": status,
+        "match_score": score,
+        "match_name": str(match_row.get('product_name', 'لا يوجد')) if match_row is not None else "لا يوجد",
+        "match_price": match_row.get('price', 0.0) if match_row is not None else 0.0,
+        "match_image": str(match_row.get('image_url', '')) if match_row is not None else "",
+        "brand": row.get('brand', 'غير محدد')
+    }
+
+def background_analysis_task(mahwous_df: pd.DataFrame, competitor_files_data: Dict[str, pd.DataFrame]):
+    try:
+        mahwous_df = mahwous_df.reset_index(drop=True)
+        matcher = SovereignMatcher(mahwous_df)
+        
+        all_comp_list = []
+        for comp_name, df in competitor_files_data.items():
+            if not df.empty:
+                df['competitor_name'] = comp_name
+                all_comp_list.append(df)
+        
+        if not all_comp_list:
+            st.session_state.analysis_running = False
             return
 
-        self.mah_processed = self._preprocess_df(self.mahwous_df)
-        self.vectorizer = TfidfVectorizer(ngram_range=(1, 3), analyzer='char_wb')
+        raw_competitor_df = pd.concat(all_comp_list, ignore_index=True)
         
-        try:
-            self.tfidf_matrix = self.vectorizer.fit_transform(self.mah_processed['clean_name'])
-        except ValueError:
-            self.mah_processed['clean_name'] = 'منتج_مجهول'
-            self.tfidf_matrix = self.vectorizer.fit_transform(self.mah_processed['clean_name'])
-
-    def _filter_samples(self, df: pd.DataFrame) -> pd.DataFrame:
-        """إزالة المنتجات التي يقل سعرها عن 15 ريال أو حجمها أقل من 10 مل."""
-        if df.empty: return df
-        # تنظيف السعر والحجم للفلترة
-        df = df.copy()
-        def get_vol(name):
-            m = re.search(r'(\d+)\s*(ml|مل)', str(name).lower())
-            return int(m.group(1)) if m else 50 # افتراض 50 إذا لم يوجد
-        
-        # تطبيق الفلترة الصارمة
-        mask = (df['price'] >= 15) & (df['product_name'].apply(get_vol) >= 10)
-        return df[mask].reset_index(drop=True)
-
-    def _preprocess_df(self, df: pd.DataFrame) -> pd.DataFrame:
-        processed = df.copy()
-        processed['clean_name'] = processed['product_name'].astype(str).apply(self.normalize_text)
-        processed['is_tester'] = processed['product_name'].astype(str).apply(self.check_if_tester)
-        processed['brand'] = processed['product_name'].astype(str).apply(self.extract_brand)
-        processed['size'] = processed['product_name'].astype(str).apply(self.extract_size)
-        processed['category'] = processed['clean_name'].apply(self.detect_category)
-        return processed
-
-    @staticmethod
-    def check_if_tester(text: str) -> bool:
-        """تمييز التستر بصرامة."""
-        kws = ['تستر', 'tester', 'بدون كرتون', 'بدون غطاء', 'تستير', 'علبة عادية']
-        return any(kw in str(text).lower() for kw in kws)
-
-    @staticmethod
-    def normalize_text(text: str) -> str:
-        if not text or pd.isna(text): return "منتج_فارغ"
-        text = str(text).lower().strip()
-        # إزالة كلمات الحشو التي ترفع النسبة كذباً
-        fillers = ['عطر', 'perfume', 'بخاخ', 'spray', 'للجنسين', 'unisex', 'للرجال', 'men', 'للنساء', 'women']
-        for f in fillers: text = text.replace(f, '')
-        
-        for word, syn in SYNONYMS.items(): text = text.replace(word, syn)
-        text = re.sub("[إأآا]", "ا", text); text = re.sub("ة", "ه", text); text = re.sub("ى", "ي", text)
-        text = re.sub(r"[^\w\s]", " ", text)
-        return " ".join(text.split())
-
-    @staticmethod
-    def detect_category(text: str) -> str:
-        if any(k in text for k in ['روج', 'شفاه', 'مكياج', 'خدود', 'بلشر']): return 'makeup'
-        if any(k in text for k in ['جهاز', 'الة', 'فواحة', 'ترطيب']): return 'device'
-        return 'perfume'
-
-    @staticmethod
-    def extract_brand(name: str) -> str:
-        name_lower = str(name).lower()
-        for syn, brand in SYNONYMS.items():
-            if syn in name_lower: return brand
-        # استخراج أول كلمة كماركة محتملة إذا لم يوجد في المترادفات
-        words = name_lower.split()
-        return words[0] if words else "unknown"
-
-    @staticmethod
-    def extract_size(name: str) -> str:
-        match = re.search(r'(\d+)\s*(ml|مل)', str(name).lower())
-        return match.group(1) if match else "unknown"
-
-    def find_best_match(self, comp_name: str) -> Dict[str, Any]:
-        if self.mahwous_df.empty:
-            return {"status": "مفقود أكيد", "confidence_level": "green", "match_name": "", "match_image": "", "match_price": 0, "match_score": 0}
-
-        # فلترة المنافس (إذا كان عينة رخيصة أو صغيرة، لا نفحصه أصلاً ونعتبره مفقوداً أو نتجاهله)
-        # سيتم التعامل مع هذا في db_manager لتسريع العملية
-
-        clean_comp = self.normalize_text(comp_name)
-        is_tester_comp = self.check_if_tester(comp_name)
-        brand_comp = self.extract_brand(comp_name)
-        size_comp = self.extract_size(comp_name)
-        cat_comp = self.detect_category(clean_comp)
-
-        potential_indices = self.mah_processed[self.mah_processed['category'] == cat_comp].index
-        if len(potential_indices) == 0: potential_indices = self.mah_processed.index
-
-        try:
-            comp_vec = self.vectorizer.transform([clean_comp])
-            cosine_sims = cosine_similarity(comp_vec, self.tfidf_matrix).flatten()
-        except:
-            cosine_sims = [0] * len(self.mah_processed)
-        
-        best_idx = -1
-        best_score = 0
-        
-        for idx in potential_indices:
-            f_score = fuzz.token_set_ratio(clean_comp, self.mah_processed.at[idx, 'clean_name'])
-            combined_score = (cosine_sims[idx] * 45) + (f_score * 0.55)
-            
-            # --- القوانين السيادية العقابية ---
-            
-            # 1. التستر ضد العادي (عقوبة قاسية جداً)
-            if is_tester_comp != self.mah_processed.at[idx, 'is_tester']:
-                combined_score *= 0.25 # خفض النسبة لـ 25% من قيمتها
-            
-            # 2. اختلاف الماركة (إذا كانت الماركة معروفة ومختلفة)
-            mah_brand = self.mah_processed.at[idx, 'brand']
-            if brand_comp != "unknown" and mah_brand != "unknown" and brand_comp != mah_brand:
-                combined_score *= 0.40 
-            
-            # 3. اختلاف الحجم (عقوبة متوسطة)
-            mah_size = self.mah_processed.at[idx, 'size']
-            if size_comp != "unknown" and mah_size != "unknown" and size_comp != mah_size:
-                combined_score *= 0.70
-
-            if combined_score > best_score:
-                best_score = combined_score
-                best_idx = idx
-
-        # --- إعادة ضبط العتبات بناءً على الطلب ---
-        final_score = min(round(best_score, 1), 100.0)
-        status = "مفقود أكيد"
-        confidence = "green"
-        match_info = {}
-
-        if best_idx != -1:
-            match_row = self.mahwous_df.iloc[best_idx]
-            match_info = {
-                "match_name": match_row['product_name'],
-                "match_image": match_row.get('image_url', ''),
-                "match_price": match_row.get('price', 0),
-                "match_score": final_score
-            }
-            
-            if final_score >= 90: # متطابق أكيد
-                status = "متطابق (متوفر)"
-                confidence = "red"
-            elif final_score >= 68: # تتطلب مراجعة (تم رفع الحد لتقليل العدد)
-                status = "مشتبه به (مراجعة)"
-                confidence = "yellow"
-
-        return {"status": status, "confidence_level": confidence, **match_info}
-
-def _run_analysis_thread(mahwous_df, competitor_data, matcher):
-    raw_results = []
-    for comp_file, df in competitor_data.items():
-        # فلترة ملف المنافس قبل الفحص (أقل من 15 ريال أو 10 مل)
-        def get_vol(name):
-            m = re.search(r'(\d+)\s*(ml|مل)', str(name).lower())
-            return int(m.group(1)) if m else 50
-        df = df[(df['price'] >= 15) & (df['product_name'].apply(get_vol) >= 10)]
-        
-        for _, row in df.iterrows():
-            if not st.session_state.analysis_running: break
-            prod_name = str(row.get('product_name', '')).strip()
-            if not prod_name: continue
-            
-            match_res = matcher.find_best_match(prod_name)
-            raw_results.append({
-                "product_name": prod_name,
-                "price": row.get('price', 0),
-                "image_url": row.get('image_url', ''),
-                "competitor_name": comp_file.replace('.csv', ''),
-                **match_res
-            })
-            st.session_state.processed_count += 1
-            if st.session_state.processed_count % 20 == 0:
-                st.session_state.analysis_results = raw_results
-                
-    if raw_results:
-        df_res = pd.DataFrame(raw_results)
-        grouped = df_res.groupby('product_name', as_index=False).agg({
-            'price': lambda x: f"{min(x)} - {max(x)}" if min(x) != max(x) else str(min(x)),
-            'competitor_name': lambda x: " ، ".join(set(x)),
-            'image_url': 'first', 'match_name': 'first', 'match_image': 'first',
-            'match_price': 'first', 'match_score': 'max', 'confidence_level': 'first', 'status': 'first'
+        # تجميع المنتجات المكررة بين المنافسين
+        raw_competitor_df['norm_name'] = raw_competitor_df['product_name'].astype(str).apply(normalize_product_name)
+        grouped_competitor_df = raw_competitor_df.groupby('norm_name', as_index=False).agg({
+            'product_name': 'first',
+            'price': 'min',
+            'image_url': 'first',
+            'brand': 'first',
+            'competitor_name': lambda x: '، '.join(x.unique())
         })
-        st.session_state.analysis_results = grouped.to_dict('records')
-    
-    st.session_state.analysis_running = False
-    st.session_state.needs_rerun = True
 
-def start_sovereign_analysis(mahwous_df, competitor_data):
-    try: matcher = SovereignMatcher(mahwous_df)
+        st.session_state.total_count = len(grouped_competitor_df)
+        st.session_state.processed_count = 0
+        st.session_state.analysis_results = []
+        
+        for _, row in grouped_competitor_df.iterrows():
+            result = process_item_pipeline(row.to_dict(), matcher)
+            if result:
+                st.session_state.analysis_results.append(result)
+            st.session_state.processed_count += 1
+
     except Exception as e:
-        st.error(f"خطأ في تهيئة المحرك: {e}"); st.session_state.analysis_running = False; return
-    
-    # حساب الإجمالي بعد الفلترة التقريبية
-    st.session_state.total_count = sum(len(df) for df in competitor_data.values())
-    st.session_state.processed_count = 0
-    st.session_state.analysis_results = []
-    st.session_state.analysis_running = True
-    thread = threading.Thread(target=_run_analysis_thread, args=(mahwous_df, competitor_data, matcher))
+        print(f"Error in background task: {e}")
+    finally:
+        st.session_state.analysis_running = False
+        st.session_state.needs_rerun = True
+
+def start_sovereign_analysis(mahwous_df: pd.DataFrame, competitor_files_data: Dict[str, pd.DataFrame]):
+    thread = threading.Thread(target=background_analysis_task, args=(mahwous_df, competitor_files_data))
+    from streamlit.runtime.scriptrunner import add_script_run_ctx
     add_script_run_ctx(thread)
     thread.start()
+
+async def ai_verify_match(comp_product: str, mahwous_product: str) -> Dict:
+    """زر التحقق الذكي عبر Gemini."""
+    if not GEMINI_API_KEY:
+        return {"reason": "مفتاح Gemini API غير موجود."}
+    
+    prompt = f"""
+    بصفتك خبير عطور دقيق، هل هذين المنتجين متطابقين تماماً؟
+    المنتج 1: {comp_product}
+    المنتج 2: {mahwous_product}
+    
+    الفروق الحرجة (ترفض التطابق): اختلاف الحجم (50مل لا يساوي 100مل)، التركيز (EDP لا يساوي EDT)، نوع المنتج (تستر لا يساوي عادي، عطر لا يساوي مزيل عرق).
+    أجب بصيغة JSON فقط:
+    {{"is_match": true/false, "reason": "سبب موجز بالعربية"}}
+    """
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = await asyncio.to_thread(model.generate_content, prompt)
+        res_text = re.sub(r'```json\s*|\s*```', '', response.text).strip()
+        return json.loads(res_text)
+    except Exception as e:
+        return {"reason": f"خطأ AI: {str(e)[:50]}"}
