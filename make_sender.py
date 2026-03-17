@@ -346,20 +346,32 @@ def send_products_to_make(products: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not formatted_products:
         return {"success": False, "message": "❌ لم يتم العثور على منتجات صالحة للإرسال"}
 
-    payload = {"data": formatted_products}
+    # إرسال كل منتج في طلب HTTP منفصل ليتوافق مع Iterator في Make
+    # الـ Iterator يتوقع كل منتج كـ Payload مستقل وليس مصفوفة واحدة
+    sent_count = 0
+    failed_count = 0
+    errors = []
 
-    try:
-        response = requests.post(
-            WEBHOOK_URL,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=30
-        )
-        
-        if response.status_code in (200, 201, 204):
-            return {"success": True, "message": f"✅ تم إرسال {len(formatted_products)} منتج بنجاح لـ Make"}
-        else:
-            return {"success": False, "message": f"❌ خطأ من Make ({response.status_code})"}
-            
-    except Exception as e:
-        return {"success": False, "message": f"❌ خطأ في الاتصال: {str(e)[:100]}"}
+    for item in formatted_products:
+        try:
+            response = requests.post(
+                WEBHOOK_URL,
+                json=item,
+                headers={"Content-Type": "application/json"},
+                timeout=30
+            )
+            if response.status_code in (200, 201, 204):
+                sent_count += 1
+            else:
+                failed_count += 1
+                errors.append(f"{item.get('أسم المنتج','؟')[:30]}: HTTP {response.status_code}")
+        except Exception as e:
+            failed_count += 1
+            errors.append(f"{item.get('أسم المنتج','؟')[:30]}: {str(e)[:50]}")
+
+    if sent_count > 0 and failed_count == 0:
+        return {"success": True, "message": f"✅ تم إرسال {sent_count} منتج بنجاح لـ Make"}
+    elif sent_count > 0:
+        return {"success": True, "message": f"⚠️ تم إرسال {sent_count} منتج، فشل {failed_count}: {'; '.join(errors[:3])}"}
+    else:
+        return {"success": False, "message": f"❌ فشل إرسال جميع المنتجات: {'; '.join(errors[:3])}"}
