@@ -116,40 +116,99 @@ def fetch_fragrantica_info(product_name):
     return {"success": False}
 
 def _generate_structural_html_description(product_name, price, brand=""):
-    """بناء وصف هيكلي (Structural HTML) برمجياً بدون ذكاء صناعي."""
+    """بناء وصف هيكلي (Structural HTML) برمجياً بدون ذكاء صناعي - بتنسيق مهووس الكامل."""
+    brand_display = brand if brand else 'ماركة عالمية'
+    link_nisa = f'<a href="{MAHWOUS_INTERNAL_LINKS["عطور نسائية"]}">العطور النسائية</a>'
+    link_rijal = f'<a href="{MAHWOUS_INTERNAL_LINKS["عطور رجالية"]}">العطور الرجالية</a>'
+    link_nish = f'<a href="{MAHWOUS_INTERNAL_LINKS["عطور النيش"]}">عطور النيش</a>'
     link_store = f'<a href="{MAHWOUS_INTERNAL_LINKS["متجر مهووس"]}">متجر مهووس</a>'
-    desc = f"""
-    <h2>{product_name}</h2>
-    <p>اكتشف الفخامة والأناقة مع <strong>{product_name}</strong> من {brand if brand else 'ماركة عالمية'}، المتوفر الآن في {link_store} بسعر حصري {price} ريال سعودي.</p>
-    <h3>مميزات المنتج</h3>
-    <ul>
-        <li>منتج أصلي 100%</li>
-        <li>تغليف فاخر يليق بهداياكم</li>
-        <li>شحن سريع لكافة مناطق المملكة</li>
-    </ul>
-    {MAHWOUS_FIXED_FOOTER}
-    """
+    desc = f"""<h2>{product_name}</h2>
+<p>اكتشف الفخامة والأناقة الحقيقية مع <strong>{product_name}</strong> من {brand_display}، العطر الذي يصوغ جاذبية فريدة ويمنحك حضوراً لا يُقاوم. تجربة عطرية استثنائية تجمع بين الأصالة والرقي، متوفرة الآن في {link_store} بسعر حصري {price} ريال سعودي.</p>
+
+<h3>تفاصيل المنتج</h3>
+<ul>
+<li><strong>الماركة:</strong> {brand_display}.</li>
+<li><strong>النوع:</strong> عطر.</li>
+<li><strong>التركيز:</strong> أو دو بارفيوم (Eau de Parfum).</li>
+<li><strong>سنة الإصدار:</strong> (غير متوفر).</li>
+</ul>
+
+<h3>رحلة العطر: النفحات والمكونات</h3>
+<p>يُقدم <strong>{product_name}</strong> رحلة عطرية مثيرة، تكشف عن طبقاتها بانسجام تام:</p>
+<ul>
+<li><strong>مقدمة العطر:</strong> انفتاح منعش يمنحك شعوراً فورياً بالحيوية والانتعاش.</li>
+<li><strong>قلب العطر:</strong> قلب زهري فاخر يخلق مزيجاً ناعماً ومميزاً.</li>
+<li><strong>قاعدة العطر:</strong> قاعدة دافئة تضفي على العطر عمقاً فاخراً وثباتاً مذهلاً يدوم لساعات.</li>
+</ul>
+
+<h3>لماذا تختار {product_name}؟</h3>
+<ul>
+<li><strong>أناقة فاخرة:</strong> عطر يجسد الجاذبية والرقي من خلال توليفة عطرية مميزة.</li>
+<li><strong>ثبات وفوحان استثنائي:</strong> بتركيز أو دو بارفيوم يضمن لك رائحة غنية تدوم لساعات طويلة.</li>
+<li><strong>تصميم راقٍ:</strong> تركيبة متوازنة تناسب الأذواق الرفيعة.</li>
+<li><strong>رائحة فريدة:</strong> عطر يقدم تجربة لا تُنسى تميزك في كل مناسبة.</li>
+</ul>
+
+<h3>الأسئلة الشائعة (FAQ)</h3>
+<p><strong>س: هل {product_name} مناسب للاستخدام اليومي؟</strong><br>ج: يُناسب هذا العطر المناسبات الخاصة والسهرات والمواعيد التي تتطلب حضوراً لافتاً.</p>
+<p><strong>س: ما مدة ثبات {product_name}؟</strong><br>ج: بفضل تركيز أو دو بارفيوم العالي، يثبت العطر لمدة 6-8 ساعات على الجلد.</p>
+
+<h3>اكتشف أكثر من مهووس للعطور</h3>
+<p>تصفح مجموعتنا من {link_nisa}، أو استكشف {link_nish} الفاخرة، وتعرف على {link_rijal} المميزة.</p>
+
+<p>امتلك سحر <strong>{product_name}</strong> ودع عبيره يحكي قصة أناقتك وجاذبيتك التي لا تتضاهى.</p>
+
+{MAHWOUS_FIXED_FOOTER}"""
     return desc.strip()
 
 def generate_mahwous_description(product_name, price, brand="", fragrantica_data=None):
-    """توليد الوصف (AI أولاً، ثم الهيكل البرمجي)."""
+    """توليد الوصف (AI أولاً بتنسيق مهووس الكامل، ثم الهيكل البرمجي)."""
     # الحالة أ: توفر ذكاء صناعي
     if GEMINI_API_KEY:
         model = genai.GenerativeModel('gemini-2.0-flash')
-        links_ctx = "\n".join([f"- {k}: {v}" for k, v in MAHWOUS_INTERNAL_LINKS.items()])
-        prompt = f"""أنت "خبير وصف منتجات مهووس". اكتب وصفاً مطولاً (1500 كلمة) لـ {product_name} بسعر {price}.
-استخدم الروابط الداخلية: {links_ctx}
-المكونات: {fragrantica_data if fragrantica_data else "Fragrantica search"}
-التنسيق: HTML/Markdown بدون إيموجي. في النهاية، يجب إضافة هذا النص تماماً: {MAHWOUS_FIXED_FOOTER}"""
+        brand_display = brand if brand else 'ماركة عالمية'
+        frag_ctx = ""
+        if fragrantica_data and fragrantica_data.get('top_notes'):
+            frag_ctx = f"""المكونات الحقيقية:
+- مقدمة العطر: {', '.join(fragrantica_data.get('top_notes', []))}
+- قلب العطر: {', '.join(fragrantica_data.get('middle_notes', []))}
+- قاعدة العطر: {', '.join(fragrantica_data.get('base_notes', []))}"""
+        else:
+            frag_ctx = "ابحث عن المكونات الحقيقية من Fragrantica وأدرجها."
+
+        prompt = f"""أنت خبير وصف منتجات متجر مهووس للعطور. اكتب وصفاً احترافياً كاملاً بالعربي لعطر "{product_name}" من {brand_display} بسعر {price} ريال.
+
+يجب أن يتبع الوصف هذا الهيكل الصارم بالضبط (HTML نظيف):
+1. <h2> اسم العطر بالعربي والإنجليزي
+2. مقدمة عاطفية تسويقية (فقرة واحدة بدون إيموجي)
+3. <h3>تفاصيل المنتج</h3> كقائمة <ul><li> تشمل: الماركة، النوع، الجنس، الحجم، التركيز، سنة الإصدار، الخط العطري
+4. <h3>رحلة العطر: النفحات والمكونات</h3> مع مقدمة وقلب وقاعدة العطر بالمكونات الحقيقية
+5. <h3>لماذا تختار {product_name}؟</h3> 4 نقاط مميزات بعنوان <strong>بولد</strong>
+6. <h3>الأسئلة الشائعة (FAQ)</h3> سؤالان بصيغة س: وج:
+7. <h3>اكتشف أكثر من مهووس للعطور</h3> مع روابط داخلية مخفية تحت الكلمات:
+   - <a href="https://mahwous.com/عطور-نسائية/c1119010419">العطور النسائية</a>
+   - <a href="https://mahwous.com/عطور-رجالية/c2020281682">العطور الرجالية</a>
+   - <a href="https://mahwous.com/عطور-النيش/c1015622154">عطور النيش</a>
+8. خاتمة تسويقية + فقرة "تجربة تسوق استثنائية بانتظرك في مهووس!"
+9. في النهاية أضف هذا النص تماماً: {MAHWOUS_FIXED_FOOTER}
+
+{frag_ctx}
+
+تعليمات صارمة:
+- لا إيموجي إطلاقاً
+- الوصف بالعربي فقط (الأسماء العلمية للمكونات بالإنجليزي بين قوسين)
+- الروابط الداخلية مخفية تحت الكلمات (Hyperlinks) وليست ظاهرة
+- الطول: 800-1200 كلمة
+- HTML نظيف بدون CSS"""
         try:
             response = model.generate_content(prompt)
             text = re.sub(r'```html|```markdown|```', '', response.text).strip()
-            if len(text) > 500: 
+            if len(text) > 500:
                 if MAHWOUS_FIXED_FOOTER not in text: text += "\n" + MAHWOUS_FIXED_FOOTER
                 return text
         except Exception: pass
-        
-    # الحالة ب: بدون ذكاء صناعي (بناء هيكلي برمجياً)
+
+    # الحالة ب: بدون ذكاء صناعي (بناء هيكلي برمجياً بتنسيق مهووس الكامل)
     return _generate_structural_html_description(product_name, price, brand)
 
 def search_market_price(product_name, our_price=0):
