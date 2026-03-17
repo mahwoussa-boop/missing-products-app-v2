@@ -1,9 +1,10 @@
 """
-ai_matcher.py v5.3 — معالجة أخطاء قوية (Robust Analysis)
+ai_matcher.py v6.0 — محرك المطابقة المتوازي (Stable & Safe)
 ═══════════════════════════════════════════════════════════════
-- معالجة أخطاء شاملة لمنع الانهيارات الصامتة (Silent Crashes)
-- كشف آمن لبيانات المنتجات باستخدام .get()
-- ضمان استمرارية شريط التقدم حتى في حال وجود أخطاء في البيانات
+- إصلاح الانهيار الصامت (Silent Crash) وتجميد شريط التقدم
+- تحديث آمن للبيانات المتزامنة (Batch State Updates)
+- سحب صور المنتجات للمقارنة البصرية
+- معالجة متوازية (Async Batching) باستخدام asyncio
 """
 
 import re
@@ -81,20 +82,17 @@ def get_hybrid_score(name1: str, name2: str, tfidf_matrix=None, idx1=None, idx2=
         except: pass
     return fuzzy_score
 
-async def process_item_pipeline(comp_row: Dict, mahwous_df: pd.DataFrame, tfidf_matrix, comp_idx: int, mahwous_len: int) -> Dict:
-    """خط أنابيب معالجة منتج واحد مع معالجة أخطاء آمنة."""
+async def process_item_pipeline(comp_row: Dict, mahwous_df: pd.DataFrame, tfidf_matrix, comp_idx: int, mahwous_len: int):
+    """خط أنابيب معالجة منتج واحد (متعدد الطبقات) مع حماية ضد الانهيار."""
     try:
-        # استخدام .get() للوصول الآمن للبيانات
         comp_name = comp_row.get('product_name', '')
-        if not comp_name or str(comp_name).strip() == "":
-            return {**comp_row, "status": "Error (Missing Data)", "confidence_level": "red", "match_name": "بيانات غير مكتملة"}
-
+        
         best_score = 0
         best_match_idx = -1
         
-        # البحث السريع
+        # Tier 1 & 2: Instant & Fast Heuristics
         for j, mah_row in mahwous_df.iterrows():
-            score = get_hybrid_score(comp_name, mah_row.get('product_name', ''), tfidf_matrix, comp_idx, j)
+            score = get_hybrid_score(comp_name, mah_row['product_name'], tfidf_matrix, comp_idx, j)
             if score > best_score:
                 best_score = score
                 best_match_idx = j
@@ -103,28 +101,28 @@ async def process_item_pipeline(comp_row: Dict, mahwous_df: pd.DataFrame, tfidf_
         status = "Confirmed Missing"
         confidence = "green"
         match_name = ""
-        match_image = ""
         
-        if best_match_idx != -1:
-            match_image = mahwous_df.iloc[best_match_idx].get('image_url', '')
-            
-            if best_score > 95:
+        if best_score > 95:
+            status = "Exact Duplicate"
+            confidence = "red"
+            match_name = mahwous_df.iloc[best_match_idx]['product_name']
+        elif best_score > 50:
+            # Tier 3: Concurrent AI Verification
+            ai_res = await ai_deep_verify_single(comp_name, mahwous_df.iloc[best_match_idx]['product_name'])
+            if ai_res.get("is_match"):
                 status = "Exact Duplicate"
                 confidence = "red"
-                match_name = mahwous_df.iloc[best_match_idx].get('product_name', '')
-            elif best_score > 50:
-                # التحقق بالذكاء الاصطناعي
-                ai_res = await ai_deep_verify_single(comp_name, mahwous_df.iloc[best_match_idx].get('product_name', ''))
-                if ai_res.get("is_match"):
-                    status = "Exact Duplicate"
-                    confidence = "red"
-                    match_name = mahwous_df.iloc[best_match_idx].get('product_name', '')
-                else:
-                    status = "Potential Match"
-                    confidence = "yellow"
-                    match_name = f"{mahwous_df.iloc[best_match_idx].get('product_name', '')} ({ai_res.get('reason')})"
+                match_name = mahwous_df.iloc[best_match_idx]['product_name']
+            else:
+                status = "Potential Match"
+                confidence = "yellow"
+                match_name = f"{mahwous_df.iloc[best_match_idx]['product_name']} ({ai_res.get('reason')})"
         
-        return {
+        # سحب صورة متجرنا للمقارنة البصرية
+        match_image = mahwous_df.iloc[best_match_idx].get('image_url', '') if best_match_idx != -1 else ""
+
+        # إرجاع النتيجة كقاموس بدلاً من التعديل المباشر في session_state
+        res = {
             **comp_row,
             "status": status,
             "confidence_level": confidence,
@@ -133,21 +131,26 @@ async def process_item_pipeline(comp_row: Dict, mahwous_df: pd.DataFrame, tfidf_
             "confidence_score": best_score,
             "detection_date": datetime.now().strftime("%Y-%m-%d")
         }
+        return res
+
     except Exception as e:
-        # إرجاع نتيجة آمنة في حال وقوع خطأ غير متوقع
+        # معالجة الخطأ بأمان لضمان عدم توقف الخيط الخلفي
         return {
             **comp_row,
-            "status": f"Error: {str(e)}",
+            "status": f"Error: {str(e)[:50]}",
             "confidence_level": "red",
-            "match_name": "خطأ في المعالجة",
+            "match_name": "",
             "match_image": "",
             "confidence_score": 0,
             "detection_date": datetime.now().strftime("%Y-%m-%d")
         }
 
 async def background_analysis_task(mahwous_df: pd.DataFrame, competitor_files_data: Dict[str, pd.DataFrame]):
-    """المهمة الخلفية لمعالجة كافة المنتجات مع معالجة أخطاء شاملة."""
+    """المهمة الخلفية لمعالجة كافة المنتجات مع الحماية ضد التوقف."""
     try:
+        # 1. إصلاح الفهرسة لمنع IndexError عند المطابقة
+        mahwous_df = mahwous_df.reset_index(drop=True)
+
         all_comp_list = []
         for comp_name, df in competitor_files_data.items():
             if not df.empty:
@@ -155,14 +158,11 @@ async def background_analysis_task(mahwous_df: pd.DataFrame, competitor_files_da
                 all_comp_list.append(df)
         
         if not all_comp_list:
-            st.session_state.analysis_running = False
             return
 
         competitor_df = pd.concat(all_comp_list, ignore_index=True)
         st.session_state.total_count = len(competitor_df)
         st.session_state.processed_count = 0
-        st.session_state.analysis_results = []
-        st.session_state.analysis_running = True
         
         # تحضير TF-IDF
         all_names = mahwous_df['product_name'].astype(str).tolist() + competitor_df['product_name'].astype(str).tolist()
@@ -173,41 +173,40 @@ async def background_analysis_task(mahwous_df: pd.DataFrame, competitor_files_da
         # معالجة المنتجات في دفعات متوازية
         batch_size = 15
         for i in range(0, len(competitor_df), batch_size):
-            try:
-                batch = competitor_df.iloc[i : i + batch_size]
-                tasks = []
-                for idx, row in batch.iterrows():
-                    tasks.append(process_item_pipeline(row.to_dict(), mahwous_df, tfidf_matrix, mahwous_len + idx, mahwous_len))
-                
-                # جمع نتائج الدفعة بشكل آمن
-                batch_results = await asyncio.gather(*tasks)
-                
-                # تحديث الحالة في Streamlit
-                st.session_state.analysis_results.extend(batch_results)
-                st.session_state.processed_count += len(batch_results)
-            except Exception as e:
-                print(f"Error in batch {i}: {e}")
-                # نضمن استمرار العداد حتى في حال فشل دفعة معينة
-                st.session_state.processed_count = min(st.session_state.processed_count + batch_size, st.session_state.total_count)
-                continue
-                
-        st.session_state.analysis_running = False
-        st.session_state.needs_rerun = True
+            batch = competitor_df.iloc[i : i + batch_size]
+            tasks = []
+            for idx, row in batch.iterrows():
+                tasks.append(process_item_pipeline(row.to_dict(), mahwous_df, tfidf_matrix, mahwous_len + idx, mahwous_len))
+            
+            # انتظار انتهاء الدفعة بالكامل
+            batch_results = await asyncio.gather(*tasks)
+            
+            # التحديث الآمن لـ session_state كدفعة واحدة
+            if 'analysis_results' not in st.session_state:
+                st.session_state.analysis_results = []
+            st.session_state.analysis_results.extend(batch_results)
+            st.session_state.processed_count += len(batch_results)
+            
     except Exception as e:
-        print(f"Critical error in background task: {e}")
+        # التقاط أي خطأ حرج لمنع التجمد الصامت
+        if 'analysis_results' not in st.session_state:
+            st.session_state.analysis_results = []
+        st.session_state.analysis_results.append({
+            "product_name": "CRITICAL ERROR", 
+            "status": str(e), 
+            "confidence_level": "red"
+        })
+    finally:
+        # التأكد دائماً من إغلاق حالة التشغيل ليعلم التطبيق بانتهاء أو توقف التحليل
         st.session_state.analysis_running = False
-        st.session_state.needs_rerun = True
 
 def start_background_analysis(mahwous_df: pd.DataFrame, competitor_files_data: Dict[str, pd.DataFrame]):
     """بدء المعالجة في Thread منفصل لضمان عدم تجميد الواجهة."""
     def run():
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(background_analysis_task(mahwous_df, competitor_files_data))
-            loop.close()
-        except Exception as e:
-            print(f"Thread Error: {e}")
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(background_analysis_task(mahwous_df, competitor_files_data))
+        loop.close()
     
     thread = threading.Thread(target=run)
     from streamlit.runtime.scriptrunner import add_script_run_ctx
