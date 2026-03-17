@@ -1,11 +1,11 @@
 """
-app.py v13.0 — الواجهة الذكية المتفاعلة (بطاقات منظمة، فلاتر شاملة، ونسب دقيقة)
+app.py v13.1 — الواجهة الذكية المتفاعلة (بطاقات منظمة، فلاتر شاملة، ونسب دقيقة مع شريط تقدم)
 ══════════════════════════════════════════════════════════════════════
 - تقسيم الأقسام بنسب تأكد واضحة (مفقود 95-100%، مراجعة 80-95%، متطابق 90-100%).
 - فلاتر شاملة (بحث، منافس، ماركة) لكل قسم.
 - سحب الصور المفقودة وتوليد الوصف بأسلوب مهووس تلقائياً قبل الإرسال.
 - عرض أنيق للمنتجات المتوفرة لدى أكثر من منافس في بطاقة واحدة.
-- حماية الأزرار والتقاط الأخطاء.
+- حماية الأزرار والتقاط الأخطاء مع شريط تقدم لحظي.
 """
 
 import streamlit as st
@@ -70,11 +70,16 @@ st.markdown("""
     .score-yellow { color: #ffc107; background: rgba(255, 193, 7, 0.1); }
     .score-red { color: #dc3545; background: rgba(220, 53, 69, 0.1); }
     .competitor-tag { background: #2d3748; color: #e2e8f0; padding: 3px 8px; border-radius: 4px; font-size: 0.9rem; margin-left: 5px; display: inline-block;}
+    
+    /* تنسيق شريط التقدم */
+    .stProgress > div > div > div > div {
+        background-image: linear-gradient(to right, #4facfe 0%, #00f2fe 100%);
+    }
 </style>
 """, unsafe_allow_html=True)
 
 def main():
-    st.title(f"{APP_ICON} {APP_TITLE} (النسخة 13.0)")
+    st.title(f"{APP_ICON} {APP_TITLE} (النسخة 13.1)")
     st.markdown("محرك المطابقة السيادي وخبير المنتجات المفقودة")
 
     # ─── الشريط الجانبي (إدارة البيانات) ───
@@ -87,6 +92,11 @@ def main():
             if mahwous_file and competitor_files:
                 try:
                     st.session_state.analysis_running = True
+                    # تصفير العدادات قبل بدء تحليل جديد
+                    st.session_state.processed_count = 0
+                    st.session_state.total_count = 0
+                    st.session_state.analysis_results = []
+                    
                     with st.spinner("جاري تهيئة البيانات والمحرك..."):
                         m_df = load_mahwous_store_data(mahwous_file)
                         c_data = {f.name: load_competitor_data(f) for f in competitor_files}
@@ -103,12 +113,27 @@ def main():
                 st.session_state.analysis_running = False
                 st.rerun()
 
-    # ─── شريط التقدم اللحظي ───
-    progress_container = st.empty()
+    # ─── شريط التقدم اللحظي (مدمج ومحسن) ───
     if st.session_state.analysis_running:
+        progress_placeholder = st.empty()
+        status_placeholder = st.empty()
+        
         if st.session_state.total_count > 0:
-            progress = min(st.session_state.processed_count / st.session_state.total_count, 1.0)
-            progress_container.progress(progress, text=f"🚀 جاري الفحص: {st.session_state.processed_count} من {st.session_state.total_count}...")
+            current = st.session_state.processed_count
+            total = st.session_state.total_count
+            percent_complete = min(current / total, 1.0)
+            
+            with progress_placeholder.container():
+                st.progress(percent_complete)
+                
+            with status_placeholder.container():
+                st.info(f"⏳ جاري الفحص والمطابقة: تمت معالجة **{current}** من أصل **{total}** منتج... ({int(percent_complete * 100)}%)")
+                
+            time.sleep(0.5) # تحديث مستمر
+            st.rerun()
+        else:
+            with status_placeholder.container():
+                st.info("🔄 جاري تجهيز المنتجات وتنقيتها من الملفات... يرجى الانتظار.")
             time.sleep(0.5)
             st.rerun()
 
