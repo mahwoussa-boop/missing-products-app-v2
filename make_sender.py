@@ -295,6 +295,11 @@ def prepare_final_payload(p: Dict[str, Any]) -> Dict[str, Any]:
         "عنوان الصفحة": seo["عنوان الصفحة"],
         "رابط الصفحة SEO": seo["رابط الصفحة SEO"],
         "وصف الصفحة": seo["وصف الصفحة"],
+        # حقول إنجليزية للتوافق مع Iterator في Make → Salla module
+        "category_name": categories[0] if categories else 'العطور',
+        "brand_name": brand,
+        "metadata_title": seo["عنوان الصفحة"],
+        "metadata_description": seo["وصف الصفحة"],
     }
     
     # 1. التحقق من الوصف (إذا كان فارغاً، يتم إنشاؤه برمجياً فوراً)
