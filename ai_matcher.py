@@ -1,211 +1,172 @@
 """
-ai_matcher.py v8.0 — محرك المطابقة فائق الذكاء (Smart Grouping & High Accuracy)
-═══════════════════════════════════════════════════════════════
-- تجميع ذكي للمنتجات: إذا كان المنتج متوفراً لدى أكثر من منافس، يتم دمجهم في بطاقة واحدة مع ذكر أسماء المنافسين.
-- مطابقة صارمة: دقة 99% للمنتجات المفقودة (تجنب تكرار المسميات المختلفة).
-- مراجعة ذكية: أي نسبة تطابق بين 40% و 80% تذهب للمراجعة (70% فما حولها).
-- أداء صاروخي عبر المعالجة المسبقة والتخزين في حالة التطبيق (Session State).
+missing_products_app/ai_matcher.py
+نظام مهووس الذكي - الإصدار V9.0 (المعدل والمصحح)
+محرك المطابقة المتقدم (RapidFuzz + TF-IDF)
 """
 
-import re
-import json
-import asyncio
 import pandas as pd
-import streamlit as st
-from rapidfuzz import process, fuzz
-from typing import List, Dict, Any, Tuple, Optional
-from datetime import datetime
-import threading
+import re
+from rapidfuzz import fuzz
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
+from typing import Dict, Tuple, Optional
 
-def normalize_arabic(text: str) -> str:
-    """تنظيف وتوحيد النصوص العربية والإنجليزية لضمان دقة المطابقة."""
-    if not text or pd.isna(text): return ""
-    text = str(text).lower().strip()
-    text = re.sub("[إأآا]", "ا", text)
-    text = re.sub("ة", "ه", text)
-    text = re.sub("ى", "ي", text)
-    text = re.sub(r"[\u064B-\u0652]", "", text)
-    text = re.sub(r"[^\w\s]", " ", text)
+def normalize_product_name(text: str) -> str:
+    """
+    تنظيف وتوحيد اسم المنتج لضمان دقة المطابقة.
+    """
+    if not isinstance(text, str) or pd.isna(text):
+        return ""
+    
+    text = text.lower()
+    text = re.sub(r'[^\w\s]', ' ', text)
+    
+    stop_words = [
+        r'\btester\b', r'\bتستر\b', r'\bedp\b', r'\bedt\b', 
+        r'\beau de parfum\b', r'\beau de toilette\b', r'\bparfum\b',
+        r'\bml\b', r'\bمل\b', r'\b100ml\b', r'\b50ml\b', r'\b200ml\b',
+        r'\bللجنسين\b', r'\bللرجال\b', r'\بللنساء\b', r'\bmen\b', r'\bwomen\b', r'\bunisex\b'
+    ]
+    for word in stop_words:
+        text = re.sub(word, ' ', text)
+    
     return " ".join(text.split())
 
-async def ai_deep_verify_single(prod_name: str, comp_name: str) -> Dict:
-    """التحقق الدقيق من منتج واحد عبر الذكاء الاصطناعي (Gemini)."""
-    try:
-        from config import GEMINI_API_KEY
-        import google.generativeai as genai
-    except ImportError as e:
-        return {"is_match": False, "reason": f"Missing Dependency: {str(e)}"}
-
-    if not GEMINI_API_KEY:
-        return {"is_match": False, "reason": "No API Key"}
-        
-    prompt = f"""
-    بصفتك خبير عطور، هل هذين المنتجين هما نفس المنتج تماماً؟
-    الفروقات الحرجة (تجعلهما مختلفين):
-    1. الحجم (50ml vs 100ml).
-    2. التركيز (EDP vs EDT vs Parfum).
-    3. النوع (Tester vs Original vs Hair Mist).
-    4. المجموعات (Set) مقابل العلب المنفردة.
-
-    المنتج 1: {prod_name}
-    المنتج 2: {comp_name}
-
-    أجب بصيغة JSON فقط:
-    {{"is_match": true/false, "reason": "سبب موجز بالعربية"}}
+def extract_attributes(name: str) -> Dict[str, str]:
     """
-    try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = await asyncio.to_thread(model.generate_content, prompt)
-        res_text = re.sub(r'```json\s*|\s*```', '', response.text).strip()
-        data = json.loads(res_text)
-        return data
-    except Exception as e:
-        return {"is_match": False, "reason": f"AI Error: {str(e)}"}
-
-def get_hybrid_score(n1: str, n2: str) -> float:
-    """حساب درجة التشابه الهجين الدقيقة جداً (يعالج اختلاف ترتيب الكلمات بذكاء)."""
-    # استخدام token_set_ratio لأنه الأفضل في تجاهل الكلمات الزائدة واختلاف الترتيب
-    token_set = fuzz.token_set_ratio(n1, n2)
-    partial_ratio = fuzz.partial_ratio(n1, n2)
-    return (token_set * 0.7) + (partial_ratio * 0.3)
-
-async def process_item_pipeline(comp_row: Dict, mahwous_df: pd.DataFrame, mahwous_norm_dict: Dict[int, str]):
-    """معالجة ذكية وسريعة للمنتج (تحديد مستوى الثقة والمطابقة)."""
-    try:
-        comp_name = str(comp_row.get('product_name', ''))
-        comp_name_norm = normalize_arabic(comp_name)
+    استخراج السمات الأساسية (الحجم، التركيز) للتمييز بين المنتجات المتشابهة.
+    """
+    attributes = {"size": "unknown", "concentration": "unknown"}
+    if not isinstance(name, str): return attributes
+    
+    name_lower = name.lower()
+    
+    # البحث عن الحجم
+    size_match = re.search(r'(\d+)\s*(ml|مل)', name_lower)
+    if size_match:
+        attributes["size"] = size_match.group(1)
         
-        best_score = 0
+    # البحث عن التركيز
+    if any(k in name_lower for k in ["edp", "parfum", "بارفيوم"]):
+        attributes["concentration"] = "edp"
+    elif any(k in name_lower for k in ["edt", "toilette", "تواليت"]):
+        attributes["concentration"] = "edt"
+        
+    return attributes
+
+class AIMatcher:
+    def __init__(self, mahwous_df: pd.DataFrame):
+        self.mahwous_df = mahwous_df
+        if not self.mahwous_df.empty:
+            # إصلاح: إنشاء العمود المنظف برمجياً قبل استخدامه
+            if 'normalized_name' not in self.mahwous_df.columns:
+                self.mahwous_df['normalized_name'] = self.mahwous_df['product_name'].apply(normalize_product_name)
+                
+            self.mahwous_names = self.mahwous_df['normalized_name'].tolist()
+            # تجهيز TF-IDF لتسريع عمليات البحث الأولية
+            self.vectorizer = TfidfVectorizer(analyzer='char_wb', ngram_range=(2, 4))
+            self.tfidf_matrix = self.vectorizer.fit_transform(self.mahwous_names)
+        else:
+            self.mahwous_names = []
+
+    def get_best_match(self, competitor_name: str) -> Tuple[Optional[pd.Series], float]:
+        """
+        البحث عن أفضل تطابق باستخدام تقنيات هجينة (TF-IDF + RapidFuzz).
+        """
+        if not self.mahwous_names:
+            return None, 0.0
+            
+        norm_name = normalize_product_name(competitor_name)
+        comp_attrs = extract_attributes(competitor_name)
+        
+        # المرحلة الأولى: تصفية سريعة باستخدام TF-IDF Cosine Similarity
+        query_vec = self.vectorizer.transform([norm_name])
+        cosine_sim = cosine_similarity(query_vec, self.tfidf_matrix).flatten()
+        
+        top_indices = cosine_sim.argsort()[-20:][::-1]
+        best_final_score = 0
         best_match_idx = -1
         
-        # فلترة صاروخية: جلب أفضل 15 تطابق محتمل
-        top_candidates = process.extract(comp_name_norm, mahwous_norm_dict, limit=15, scorer=fuzz.WRatio)
-        
-        # فحص دقيق لتجنب الأخطاء (يمنع تصنيف منتج متوفر على أنه مفقود)
-        for match_tuple in top_candidates:
-            mah_norm = match_tuple[0]  
-            idx = match_tuple[2]       
+        # المرحلة الثانية: مطابقة دقيقة باستخدام RapidFuzz
+        for idx in top_indices:
+            mahwous_name = self.mahwous_names[idx]
+            fuzz_score = fuzz.token_set_ratio(norm_name, mahwous_name)
             
-            score = get_hybrid_score(comp_name_norm, mah_norm)
-            if score > best_score:
-                best_score = score
+            mahwous_row = self.mahwous_df.iloc[idx]
+            # إصلاح: استخدام مفتاح product_name الصحيح
+            mahwous_attrs = extract_attributes(str(mahwous_row.get('product_name', '')))
+            
+            if comp_attrs["size"] != "unknown" and mahwous_attrs["size"] != "unknown":
+                if comp_attrs["size"] != mahwous_attrs["size"]:
+                    fuzz_score *= 0.6
+            
+            if comp_attrs["concentration"] != "unknown" and mahwous_attrs["concentration"] != "unknown":
+                if comp_attrs["concentration"] != mahwous_attrs["concentration"]:
+                    fuzz_score *= 0.8
+
+            if fuzz_score > best_final_score:
+                best_final_score = fuzz_score
                 best_match_idx = idx
+                
+        if best_match_idx != -1:
+            return self.mahwous_df.iloc[best_match_idx], best_final_score
+        return None, 0.0
 
-        status = "Confirmed Missing"
-        confidence = "green"
-        match_name = ""
-        
-        # تصنيف ذكي للنتائج:
-        # > 80% : منتج مكرر أكيد (لا يعرض في المفقودات لتجنب التكرار)
-        # 40% - 80% : يحتاج مراجعة وتدقيق (نسبة 70% وما حولها)
-        # < 40% : منتج مفقود مؤكد (ثقة 99% أنه غير متوفر لدينا)
-        
-        if best_score > 80:  
-            status = "Exact Duplicate"
-            confidence = "red"
-            match_name = str(mahwous_df.iloc[best_match_idx]['product_name'])
-        elif best_score >= 40:
-            match_name_candidate = str(mahwous_df.iloc[best_match_idx]['product_name'])
-            # تحقق عميق عبر AI للحالات المحيرة
-            ai_res = await ai_deep_verify_single(comp_name, match_name_candidate)
-            if ai_res.get("is_match"):
-                status = "Exact Duplicate"
-                confidence = "red"
-                match_name = match_name_candidate
-            else:
-                status = "Potential Match"
-                confidence = "yellow"
-                match_name = f"{match_name_candidate} ({ai_res.get('reason')})"
-        
-        match_image = str(mahwous_df.iloc[best_match_idx].get('image_url', '')) if best_match_idx != -1 else ""
-
-        return {
-            **comp_row,
-            "status": status,
-            "confidence_level": confidence,
-            "match_name": match_name,
-            "match_image": match_image,
-            "confidence_score": best_score,
-            "detection_date": datetime.now().strftime("%Y-%m-%d")
-        }
-
-    except Exception as e:
-        return {
-            **comp_row,
-            "status": f"Error: {str(e)[:50]}",
-            "confidence_level": "red",
-            "match_name": "",
-            "match_image": "",
-            "confidence_score": 0,
-            "detection_date": datetime.now().strftime("%Y-%m-%d")
-        }
-
-async def background_analysis_task(mahwous_df: pd.DataFrame, competitor_files_data: Dict[str, pd.DataFrame]):
-    """إدارة المهمة وتجميع المنافسين بشكل ذكي لمنع التكرار."""
-    try:
-        mahwous_df = mahwous_df.reset_index(drop=True)
-        mahwous_norm_dict = {idx: normalize_arabic(str(name)) for idx, name in mahwous_df['product_name'].items()}
-
-        all_comp_list = []
-        for comp_name, df in competitor_files_data.items():
-            if not df.empty:
-                df['competitor_name'] = comp_name
-                all_comp_list.append(df)
-        
-        if not all_comp_list:
-            return
-
-        raw_competitor_df = pd.concat(all_comp_list, ignore_index=True)
-        
-        # تجميع المنتجات المتشابهة بين المنافسين في بطاقة واحدة بذكاء
-        raw_competitor_df['norm_name'] = raw_competitor_df['product_name'].apply(normalize_arabic)
-        
-        grouped_competitor_df = raw_competitor_df.groupby('norm_name').agg({
-            'product_name': 'first',
-            'price': 'min', # أخذ أقل سعر
-            'image_url': 'first',
-            'brand': 'first',
-            'competitor_name': lambda x: '، '.join(x.unique()) # دمج أسماء المنافسين
-        }).reset_index(drop=True)
-
-        st.session_state.total_count = len(grouped_competitor_df)
-        st.session_state.processed_count = 0
-        
-        batch_size = 15
-        for i in range(0, len(grouped_competitor_df), batch_size):
-            batch = grouped_competitor_df.iloc[i : i + batch_size]
-            tasks = []
-            for _, row in batch.iterrows():
-                tasks.append(process_item_pipeline(row.to_dict(), mahwous_df, mahwous_norm_dict))
-            
-            batch_results = await asyncio.gather(*tasks)
-            
-            if 'analysis_results' not in st.session_state:
-                st.session_state.analysis_results = []
-            st.session_state.analysis_results.extend(batch_results)
-            st.session_state.processed_count += len(batch_results)
-            
-    except Exception as e:
-        if 'analysis_results' not in st.session_state:
-            st.session_state.analysis_results = []
-        st.session_state.analysis_results.append({
-            "product_name": "CRITICAL ERROR", 
-            "status": str(e), 
-            "confidence_level": "red"
-        })
-    finally:
-        st.session_state.analysis_running = False
-
-def start_background_analysis(mahwous_df: pd.DataFrame, competitor_files_data: Dict[str, pd.DataFrame]):
-    """بدء المعالجة في Thread آمن لتجنب تجميد الواجهة."""
-    def run():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(background_analysis_task(mahwous_df, competitor_files_data))
-        loop.close()
+def process_competitors(mahwous_df: pd.DataFrame, competitors_data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """
+    معالجة بيانات المنافسين وتصنيفها بناءً على عتبات الدقة الجديدة V9.0.
+    """
+    matcher = AIMatcher(mahwous_df)
+    results = []
     
-    thread = threading.Thread(target=run)
-    from streamlit.runtime.scriptrunner import add_script_run_ctx
-    add_script_run_ctx(thread)
-    thread.start()
+    for comp_name, comp_df in competitors_data.items():
+        if comp_df.empty:
+            continue
+            
+        for _, row in comp_df.iterrows():
+            # إصلاح: استخدام product_name بدلاً من name
+            product_name = str(row.get('product_name', ''))
+            if not product_name or product_name == 'nan':
+                continue
+                
+            match_row, score = matcher.get_best_match(product_name)
+            
+            if score >= 80:
+                status = "متوفر (مكرر)"
+            elif score >= 40:
+                status = "يحتاج مراجعة"
+            else:
+                status = "منتج مفقود مؤكد"
+                
+            results.append({
+                "product_name": product_name,
+                "price": row.get('price', 0.0),
+                "image_url": row.get('image_url', ''),
+                "competitor_name": comp_name,
+                "confidence_score": score,
+                "status": status,
+                # إصلاح: استخدام المفاتيح الإنجليزية الصحيحة
+                "matched_product": match_row.get('product_name', 'لا يوجد') if match_row is not None else "لا يوجد",
+                "matched_image": match_row.get('image_url', '') if match_row is not None else "",
+                "brand": row.get('brand', 'غير محدد')
+            })
+            
+    return pd.DataFrame(results)
+
+def get_brand_statistics(results_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    حساب إحصائيات الماركات المفقودة لتحديد الفرص البيعية.
+    """
+    if results_df.empty:
+        return pd.DataFrame()
+        
+    missing_only = results_df[results_df['status'] == "منتج مفقود مؤكد"]
+    
+    if missing_only.empty:
+        return pd.DataFrame()
+        
+    brand_stats = missing_only.groupby('brand').size().reset_index(name='count')
+    brand_stats = brand_stats.sort_values(by='count', ascending=False).head(10)
+    
+    return brand_stats
