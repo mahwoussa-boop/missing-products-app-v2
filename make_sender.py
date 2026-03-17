@@ -1,5 +1,4 @@
-"""
-make_sender.py v14.10 — مدير الإرسال الهجين الصارم (AI + Python)
+"""make_sender.py v14.120 — مدير الإرسال الهجين الصارم (AI + Python)
 ═══════════════════════════════════════════════════════════════
 - إصلاح وتشفير روابط الصور برمجياً (Python) لضمان توافق ميك وسلة 100%.
 - دالة prepare_final_payload لضمان جودة الوصف والصور قبل الإرسال.
@@ -12,6 +11,126 @@ import csv
 import re
 import urllib.parse
 from typing import List, Dict, Any
+
+# ─── تحميل قائمة تصنيفات مهووس المعتمدة (من ملف CSV) ───
+def _load_mahwous_categories() -> list:
+    """تحميل قائمة تصنيفات مهووس الكاملة من ملف تصنيفاتمهووس.csv"""
+    cats = []
+    csv_paths = [
+        '/home/ubuntu/upload/تصنيفاتمهووس.csv',
+        os.path.join(os.path.dirname(__file__), '..', 'upload', 'تصنيفاتمهووس.csv'),
+    ]
+    for path in csv_paths:
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                for i, row in enumerate(reader):
+                    if i == 0: continue
+                    if row and row[0].strip():
+                        cats.append({
+                            'name': row[0].strip(),
+                            'parent': row[2].strip() if len(row) > 2 and row[2].strip() else '',
+                        })
+            break
+        except Exception:
+            continue
+    return cats
+
+MAHWOUS_CATEGORIES = _load_mahwous_categories()
+
+def _smart_categorize(product_name: str, brand: str = '') -> list:
+    """
+    التصنيف الذكي للمنتج: يُحدد 1-3 تصنيفات مناسبة بناءً على اسم المنتج.
+    القواعد:
+    - تستر → عطور التستر + (رجالية/نسائية)
+    - عطر رجالي → عطور رجالية + العطور
+    - عطر نسائي → عطور نسائية + العطور
+    - مجموعة/طقم → مجموعات وأطقم هدايا + (رجالية/نسائية)
+    - بخور/عود → العود و البخور
+    - مكياج → المكياج + الجمال و العناية
+    - عناية → الجمال و العناية
+    - جل/كريم/لوشن/بودر → للشعر والجسم
+    - عينة/ميني → عطور عينات ميني
+    - نيش → عطور النيش + (رجالية/نسائية)
+    - أطفال → عطور الأطفال
+    - بديل → بدائل العطور
+    - فرموني → عطور فرمونية
+    - افتراضي → العطور
+    """
+    name_lower = product_name.lower()
+    cats = []
+
+    # تحديد الجنس
+    is_female = any(w in name_lower for w in ['نسائي', 'نسائية', 'women', 'woman', 'femme', 'pour femme', 'her', 'lady', 'ladies'])
+    is_male   = any(w in name_lower for w in ['رجالي', 'رجالية', 'men', 'man', 'homme', 'pour homme', 'him', 'his'])
+
+    # --- قواعد التصنيف الذكي ---
+    if any(w in name_lower for w in ['تستر', 'tester']):
+        cats.append('عطور التستر')
+        if is_female: cats.append('عطور التستر نسائية')
+        elif is_male: cats.append('عطور التستر رجالية')
+
+    elif any(w in name_lower for w in ['مجموعة', 'طقم', 'set', 'gift', 'هدية', 'collection', 'pack']):
+        cats.append('مجموعات وأطقم هدايا')
+        if is_female: cats.append('مجموعات عطور نسائية')
+        elif is_male: cats.append('مجموعات عطور رجالية')
+
+    elif any(w in name_lower for w in ['عينة', 'ميني', 'sample', 'mini', 'travel']):
+        cats.append('عطور عينات ميني')
+        if is_female: cats.append('عينات عطور نسائية')
+        elif is_male: cats.append('عينات عطور رجالية')
+
+    elif any(w in name_lower for w in ['بخور', 'عود', 'oud', 'bakhour', 'bukhoor', 'incense', 'مبخرة']):
+        cats.append('العود و البخور')
+        if 'بخور' in name_lower or 'incense' in name_lower: cats.append('بخور فاخر')
+        elif 'عود' in name_lower or 'oud' in name_lower: cats.append('عود طبيعي')
+
+    elif any(w in name_lower for w in ['مكياج', 'ماسكارا', 'ريميل', 'احمر', 'كحل', 'makeup', 'mascara', 'lipstick', 'foundation', 'blush', 'contour']):
+        cats.append('المكياج')
+        cats.append('الجمال و العناية')
+
+    elif any(w in name_lower for w in ['كريم', 'لوشن', 'بودر', 'بودرة', 'جل استحمام', 'شامبو', 'cream', 'lotion', 'powder', 'shower', 'shampoo', 'body']):
+        cats.append('للشعر والجسم')
+        if any(w in name_lower for w in ['جل', 'shower', 'body wash']): cats.append('عطور الجسم')
+        elif any(w in name_lower for w in ['بودر', 'powder']): cats.append('بودراة الجسم')
+
+    elif any(w in name_lower for w in ['نيش', 'niche']):
+        cats.append('عطور النيش')
+        if is_female: cats.append('عطور النيش نسائية')
+        elif is_male: cats.append('عطور النيش رجالية')
+        else: cats.append('عطور النيش للجنسين')
+
+    elif any(w in name_lower for w in ['بديل', 'alternative', 'inspired']):
+        cats.append('بدائل العطور')
+        if is_female: cats.append('بدائل العطور نسائية')
+        elif is_male: cats.append('بدائل العطور رجالية')
+
+    elif any(w in name_lower for w in ['فرموني', 'pheromone', 'فيرومون']):
+        cats.append('عطور فرمونية')
+        if is_female: cats.append('عطور فرمونية نسائية')
+        elif is_male: cats.append('عطور فرمونية رجالية')
+
+    elif any(w in name_lower for w in ['اطفال', 'طفل', 'kids', 'children', 'baby', 'child']):
+        cats.append('عطور الأطفال')
+
+    elif any(w in name_lower for w in ['عناية', 'سيروم', 'serum', 'mask', 'قناع', 'تونر', 'toner']):
+        cats.append('الجمال و العناية')
+        cats.append('العناية')
+
+    else:
+        # عطر عام - تحديد الجنس
+        cats.append('العطور')
+        if is_female: cats.append('عطور نسائية')
+        elif is_male: cats.append('عطور رجالية')
+
+    # التحقق من وجود التصنيفات في قائمة مهووس المعتمدة
+    valid_cat_names = {c['name'] for c in MAHWOUS_CATEGORIES}
+    validated = [c for c in cats if c in valid_cat_names]
+    # إذا لم يُطابق أي تصنيف، استخدم "العطور" كافتراضي
+    if not validated:
+        validated = ['العطور']
+    # حد أقصى 3 تصنيفات
+    return validated[:3]
 
 # ─── تحميل قائمة ماركات مهووس المعتمدة (من ملف CSV) ───
 def _load_mahwous_brands() -> dict:
@@ -156,6 +275,9 @@ def prepare_final_payload(p: Dict[str, Any]) -> Dict[str, Any]:
     # بناء حقول SEO
     seo = _build_seo_fields(name, brand)
 
+    # التصنيف الذكي (1-3 تصنيفات حسب نوع المنتج)
+    categories = _smart_categorize(name, brand_raw)
+
     # بناء الهيكلة الصارمة (المفاتيح العربية ثابتة لا تتغير)
     item = {
         "أسم المنتج": name,
@@ -164,6 +286,9 @@ def prepare_final_payload(p: Dict[str, Any]) -> Dict[str, Any]:
         "سعر التكلفة": 0,
         "السعر المخفض": 0,
         "الماركة": brand,
+        "اسم الماركة": brand_raw,
+        "التصنيف": categories[0] if categories else 'العطور',
+        "التصنيفات": categories,
         "الوصف": str(p.get("description", "")).strip(),
         "صورة المنتج": "",
         "صور إضافية": [],
