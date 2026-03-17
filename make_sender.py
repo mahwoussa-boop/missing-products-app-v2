@@ -1,19 +1,17 @@
 """
-make_sender.py v2.0 — إرسال آمن إلى Make.com
+make_sender.py v3.0 — إرسال آمن وغير متزامن إلى Make.com
 ══════════════════════════════════════════════════
-⚠️ القاعدة الحرجة: بنية الـ Payload ثابتة ولا تتغير أبداً!
-{"data": [{"أسم المنتج":"...","سعر المنتج":...,...}]}
+الأولوية: الحفاظ على بنية Payload الثابتة وضمان السرعة عبر aiohttp.
 """
 
-import time
+import asyncio
+import aiohttp
 import requests
 import streamlit as st
 from typing import List, Dict, Any
 from config import WEBHOOK_NEW_PRODUCTS
 
-
 def _safe_float(val, default: float = 0.0) -> float:
-    """تحويل آمن إلى float."""
     try:
         if val is None or str(val).strip() in ("", "nan", "None", "NaN"):
             return default
@@ -21,9 +19,7 @@ def _safe_float(val, default: float = 0.0) -> float:
     except (ValueError, TypeError):
         return default
 
-
 def _safe_str(val, default: str = "") -> str:
-    """تحويل آمن إلى string."""
     if val is None:
         return default
     s = str(val).strip()
@@ -31,12 +27,8 @@ def _safe_str(val, default: str = "") -> str:
         return default
     return s
 
-
 def build_payload(product: Dict) -> Dict:
-    """
-    بناء الـ Payload بالبنية الإلزامية الثابتة.
-    ⚠️ لا تُغيّر أسماء المفاتيح العربية — Make.com يعتمد عليها!
-    """
+    """بناء الـ Payload بالبنية الإلزامية الثابتة لـ Make.com."""
     return {
         "data": [{
             "أسم المنتج":      _safe_str(product.get("product_name", "")),
@@ -50,104 +42,70 @@ def build_payload(product: Dict) -> Dict:
         }]
     }
 
+async def send_single_product_async(session: aiohttp.ClientSession, url: str, product: Dict) -> bool:
+    """إرسال منتج واحد بشكل غير متزامن."""
+    payload = build_payload(product)
+    try:
+        async with session.post(url, json=payload, timeout=20) as resp:
+            return resp.status in (200, 201, 202, 204)
+    except Exception as e:
+        print(f"Error sending product: {e}")
+        return False
 
-def send_products_to_make(
-    products: List[Dict],
-    delay: float = 0.3,
-    webhook_url: str = "",
-) -> Dict[str, Any]:
-    """
-    إرسال المنتجات إلى Make.com — كل منتج في طلب مستقل.
-    
-    ⚠️ لماذا كل منتج على حدة؟
-    لأن سيناريو Make يستخدم BasicFeeder يقرأ {{1.data}}
-    ويتوقع عنصراً واحداً في كل طلب.
-    """
+def send_products_to_make(products: List[Dict], webhook_url: str = "") -> Dict[str, Any]:
+    """إرسال مجموعة منتجات إلى Make.com بشكل متزامن (wrapper لسهولة الاستخدام)."""
     url = webhook_url or WEBHOOK_NEW_PRODUCTS
-
-    if not products:
-        return {"success": False, "message": "❌ لا توجد منتجات محددة للإرسال.", "sent": 0, "failed": 0}
-
     if not url or "hook" not in url:
-        return {"success": False, "message": "❌ رابط Webhook غير صحيح. تحقق من الإعدادات.", "sent": 0, "failed": 0}
-
+        return {"success": False, "message": "❌ رابط Webhook غير صحيح.", "sent": 0, "failed": 0}
+    
     sent = 0
     failed = 0
-    errors = []
+    
+    # محاولة تشغيل حلقة الأحداث بشكل آمن
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
-    progress = st.progress(0, text="🚀 بدء الإرسال إلى Make.com...")
+    async def run_batch():
+        nonlocal sent, failed
+        async with aiohttp.ClientSession() as session:
+            tasks = [send_single_product_async(session, url, p) for p in products]
+            results = await asyncio.gather(*tasks)
+            sent = sum(1 for r in results if r)
+            failed = len(results) - sent
 
-    for i, product in enumerate(products):
-        name = _safe_str(product.get("product_name", "منتج"))
-        payload = build_payload(product)
-
-        try:
-            resp = requests.post(
-                url,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-                timeout=20,
-            )
-            if resp.status_code in (200, 201, 202, 204):
-                sent += 1
-            else:
-                failed += 1
-                errors.append(f"{name[:30]}: HTTP {resp.status_code}")
-        except requests.exceptions.RequestException as e:
-            failed += 1
-            errors.append(f"{name[:30]}: {str(e)[:50]}")
-
-        # تحديث شريط التقدم
-        pct = (i + 1) / len(products)
-        progress.progress(pct, text=f"📤 إرسال {i+1}/{len(products)}: {name[:40]}...")
-
-        # تأخير بين الطلبات لحماية السيناريو
-        if i < len(products) - 1:
-            time.sleep(delay)
-
-    progress.progress(1.0, text="✅ اكتمل الإرسال!")
-
-    # رسالة النتيجة
-    if sent == len(products):
-        return {
-            "success": True,
-            "message": f"✅ نجاح! تم إرسال {sent} منتج إلى Make.com.",
-            "sent": sent,
-            "failed": 0,
-        }
+    if loop.is_running():
+        # إذا كانت الحلقة تعمل بالفعل (كما في Streamlit)، نستخدم Thread لإرسال البيانات
+        import threading
+        def start_loop(loop):
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(run_batch())
+        
+        new_loop = asyncio.new_event_loop()
+        t = threading.Thread(target=start_loop, args=(new_loop,))
+        t.start()
+        t.join()
     else:
-        err_summary = " | ".join(errors[:5])
-        return {
-            "success": failed == 0,
-            "message": f"تم إرسال {sent} من {len(products)} منتج. فشل {failed}.\n{err_summary}",
-            "sent": sent,
-            "failed": failed,
-        }
-
+        loop.run_until_complete(run_batch())
+    
+    return {
+        "success": failed == 0,
+        "message": f"تم إرسال {sent} من {len(products)} منتج.",
+        "sent": sent,
+        "failed": failed
+    }
 
 def verify_webhook() -> Dict:
     """فحص الاتصال بـ Webhook."""
     url = WEBHOOK_NEW_PRODUCTS
-    if not url:
-        return {"success": False, "message": "❌ رابط Webhook غير محدد"}
-
-    test_payload = {
-        "data": [{
-            "أسم المنتج": "اختبار اتصال",
-            "سعر المنتج": 0.0,
-            "رمز المنتج sku": "TEST-000",
-            "الوزن": 1,
-            "سعر التكلفة": 0.0,
-            "السعر المخفض": 0.0,
-            "الوصف": "هذا اختبار اتصال فقط",
-            "صورة المنتج": "",
-        }]
-    }
-
+    if not url: return {"success": False, "message": "❌ رابط Webhook غير محدد"}
+    
     try:
-        resp = requests.post(url, json=test_payload, timeout=10)
+        resp = requests.post(url, json=build_payload({"product_name": "Test Connection"}), timeout=10)
         if resp.status_code in (200, 201, 202, 204):
             return {"success": True, "message": f"✅ الاتصال ناجح ({resp.status_code})"}
-        return {"success": False, "message": f"❌ HTTP {resp.status_code}: {resp.text[:100]}"}
+        return {"success": False, "message": f"❌ HTTP {resp.status_code}"}
     except Exception as e:
-        return {"success": False, "message": f"❌ فشل الاتصال: {str(e)[:80]}"}
+        return {"success": False, "message": f"❌ فشل الاتصال: {str(e)}"}

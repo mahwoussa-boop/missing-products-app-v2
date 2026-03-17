@@ -1,547 +1,172 @@
 """
-ai_matcher.py v2.0 — محرك المطابقة الذكي متعدد الطبقات
-═══════════════════════════════════════════════════════════
-الطبقات:
-  1. تطبيع عدواني (Aggressive Normalize) + مرادفات عربي↔إنجليزي
-  2. استخلاص الماركة + خط المنتج + الحجم + النوع
-  3. Fuzzy matching باستخدام rapidfuzz (أسرع 10x من thefuzz)
-  4. كشف التستر/الأساسي والأحجام المختلفة
-  5. (اختياري) تحقق AI عبر Gemini للحالات الغامضة
+ai_matcher.py v3.0 — محرك المطابقة الهجين المتقدم
+══════════════════════════════════════════════════
+الأولوية القصوى: القضاء على النتائج الإيجابية الخاطئة (False Positives).
+النظام: تنظيف النصوص -> RapidFuzz + TF-IDF -> التحقق الدقيق بواسطة LLM.
 """
 
 import re
 import json
-import time
-import hashlib
-import requests
+import asyncio
+import aiohttp
 import pandas as pd
+import numpy as np
+import streamlit as st
+import google.generativeai as genai
+from rapidfuzz import fuzz, process
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from typing import List, Dict, Any, Tuple, Optional
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Any
-from rapidfuzz import fuzz, process as rf_process
 
-from config import (
-    SYNONYMS, KNOWN_BRANDS, _BRANDS_LOWER,
-    REJECT_KEYWORDS, TESTER_KEYWORDS, SET_KEYWORDS,
-    CONFIRMED_THRESHOLD, SIMILAR_THRESHOLD, DIRECT_MATCH_THRESHOLD,
-    GEMINI_API_KEYS, GEMINI_MODEL,
-)
+from config import GEMINI_API_KEY
 
+# إعداد Gemini
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
-# ══════════════════════════════════════════════════════════════
-#  الطبقة 1: التطبيع العدواني
-# ══════════════════════════════════════════════════════════════
-
-def normalize_aggressive(text: str) -> str:
-    """
-    تطبيع عدواني: يحوّل النص إلى صيغة موحدة قابلة للمقارنة.
-    - أحرف صغيرة
-    - استبدال المرادفات (عربي→إنجليزي)
-    - إزالة التشكيل والرموز الخاصة
-    - توحيد المسافات
-    """
-    if not isinstance(text, str) or not text.strip():
+def normalize_arabic(text: str) -> str:
+    """تنظيف وتوحيد النصوص العربية والإنجليزية."""
+    if not text or pd.isna(text):
         return ""
+    text = str(text).lower().strip()
+    # توحيد الحروف العربية
+    text = re.sub("[إأآا]", "ا", text)
+    text = re.sub("ة", "ه", text)
+    text = re.sub("ى", "ي", text)
+    # إزالة الحركات
+    text = re.sub(r"[\u064B-\u0652]", "", text)
+    # إزالة الرموز الخاصة مع الإبقاء على الأرقام والكلمات المهمة
+    text = re.sub(r"[^\w\s]", " ", text)
+    # إزالة المسافات الزائدة
+    text = " ".join(text.split())
+    return text
 
-    t = text.strip().lower()
+def extract_features(text: str) -> Dict[str, Any]:
+    """استخراج ميزات المنتج (الحجم، التركيز، النوع)."""
+    text = text.lower()
+    features = {
+        "size": re.search(r"(\d+)\s*(ml|مل)", text),
+        "concentration": re.search(r"(edp|edt|parfum|eau de parfum|eau de toilette|عطر|تواليت)", text),
+        "is_tester": "tester" in text or "تستر" in text,
+        "is_hair_mist": "hair mist" in text or "عطر شعر" in text,
+    }
+    features["size"] = features["size"].group(1) if features["size"] else None
+    features["concentration"] = features["concentration"].group(0) if features["concentration"] else None
+    return features
 
-    # إزالة التشكيل العربي
-    t = re.sub(r'[\u0610-\u061A\u064B-\u065F\u0670]', '', t)
-
-    # استبدال المرادفات (الأطول أولاً لتجنب التداخل)
-    for ar, en in sorted(SYNONYMS.items(), key=lambda x: -len(x[0])):
-        t = t.replace(ar, en)
-
-    # إزالة الرموز الخاصة (عدا الأحرف والأرقام والمسافات)
-    t = re.sub(r'[^\w\s]', ' ', t)
-
-    # إزالة "ml" / "مل" مع الأرقام المرتبطة (نحتفظ بها في extract_size)
-    t = re.sub(r'\b\d+\s*(ml|مل|ملي)\b', '', t)
-
-    # إزالة كلمات شائعة لا تؤثر على الهوية
-    noise = [
-        "for men", "for women", "pour homme", "pour femme",
-        "unisex", "للرجال", "للنساء", "رجالي", "نسائي",
-        "عطر", "perfume", "spray", "بخاخ", "new", "جديد",
-        "original", "اصلي", "أصلي",
-    ]
-    for w in noise:
-        t = t.replace(w, "")
-
-    # توحيد المسافات
-    t = " ".join(t.split())
-    return t
-
-
-def normalize_bare(text: str) -> str:
-    """تطبيع أكثر عدوانية: يزيل حتى كلمات التستر والنوع."""
-    t = normalize_aggressive(text)
-    for kw in TESTER_KEYWORDS + ["edp", "edt", "edc", "extrait", "intense", "parfum"]:
-        t = re.sub(rf'\b{re.escape(kw)}\b', '', t)
-    return " ".join(t.split())
-
-
-# ══════════════════════════════════════════════════════════════
-#  الطبقة 2: استخلاص المكونات (ماركة، حجم، نوع، جنس)
-# ══════════════════════════════════════════════════════════════
-
-def extract_brand(text: str) -> str:
-    """استخلاص اسم الماركة من اسم المنتج."""
-    if not text:
-        return ""
-    t_lower = text.lower()
-
-    # أولاً: بحث في المرادفات العربية
-    for ar, en in SYNONYMS.items():
-        if ar in t_lower and en.lower() in _BRANDS_LOWER:
-            return en.title()
-
-    # ثانياً: بحث مباشر في الماركات المعروفة
-    for brand in KNOWN_BRANDS:
-        if brand.lower() in t_lower:
-            return brand
-    return ""
-
-
-def extract_size(text: str) -> Optional[int]:
-    """استخلاص حجم العبوة بالمل."""
-    if not text:
-        return None
-    m = re.search(r'(\d+)\s*(ml|مل|ملي)', text.lower())
-    if m:
-        return int(m.group(1))
-    return None
-
-
-def extract_type(text: str) -> str:
-    """استخلاص نوع العطر (EDP, EDT, إلخ)."""
-    t = text.lower()
-    if any(k in t for k in ["edp", "eau de parfum", "او دو بارفان", "بارفان", "بارفيوم", "لو دي بارفان"]):
-        return "EDP"
-    if any(k in t for k in ["edt", "eau de toilette", "او دو تواليت", "تواليت"]):
-        return "EDT"
-    if any(k in t for k in ["edc", "cologne", "كولون"]):
-        return "EDC"
-    if any(k in t for k in ["extrait", "parfum extrait"]):
-        return "Extrait"
-    if any(k in t for k in ["intense", "إنتينس", "انتنس", "انتينس"]):
-        return "Intense"
-    return ""
-
-
-def extract_gender(text: str) -> str:
-    """استخلاص الجنس."""
-    t = text.lower()
-    if any(k in t for k in ["for men", "pour homme", "للرجال", "رجالي", "homme"]):
-        return "رجالي"
-    if any(k in t for k in ["for women", "pour femme", "للنساء", "نسائي", "femme"]):
-        return "نسائي"
-    return "مشترك"
-
-
-def is_tester(text: str) -> bool:
-    """هل المنتج تستر؟"""
-    t = text.lower()
-    return any(kw in t for kw in TESTER_KEYWORDS)
-
-
-def is_set(text: str) -> bool:
-    """هل المنتج طقم/مجموعة؟"""
-    t = text.lower()
-    return any(kw in t for kw in SET_KEYWORDS)
-
-
-def is_sample(text: str) -> bool:
-    """هل المنتج عينة/تقسيمة؟"""
-    t = text.lower()
-    return any(kw in t for kw in REJECT_KEYWORDS)
-
-
-# ══════════════════════════════════════════════════════════════
-#  الطبقة 3: محرك المقارنة الرئيسي
-# ══════════════════════════════════════════════════════════════
-
-def _prepare_our_items(mahwous_df: pd.DataFrame) -> List[Dict]:
-    """تجهيز منتجاتنا مرة واحدة (مُخزَّنة مؤقتاً)."""
-    items = []
-    for _, row in mahwous_df.iterrows():
-        raw = str(row.get("name", "")).strip()
-        if not raw:
-            continue
-        norm = normalize_aggressive(raw)
-        bare = normalize_bare(raw)
-        if not norm or len(bare) < 3:
-            continue
-        items.append({
-            "raw": raw,
-            "norm": norm,
-            "bare": bare,
-            "brand": extract_brand(raw),
-            "size": extract_size(raw),
-            "type": extract_type(raw),
-            "is_tester": is_tester(raw),
-        })
-    return items
-
-
-def _find_best_match(
-    comp_name: str,
-    comp_norm: str,
-    comp_bare: str,
-    comp_brand: str,
-    comp_size: Optional[int],
-    comp_type: str,
-    comp_is_tester: bool,
-    our_items: List[Dict],
-) -> Tuple[bool, float, str, Optional[Dict]]:
-    """
-    البحث عن أفضل تطابق لمنتج منافس في منتجاتنا.
-    يُعيد: (found, score, reason, variant_info)
-    """
-    if not our_items or not comp_bare:
-        return False, 0.0, "", None
-
-    best_same_score = 0.0
-    best_same_item = None
-    best_variant_score = 0.0
-    best_variant_item = None
-
-    # — مقارنة مع كل منتج من منتجاتنا —
-    for item in our_items:
-        # المطابقة الرئيسية: token_set_ratio على النص المُطبّع
-        score = fuzz.token_set_ratio(comp_bare, item["bare"])
-
-        # مكافأة تطابق الماركة
-        if comp_brand and item["brand"] and comp_brand.lower() == item["brand"].lower():
-            score = min(100, score + 5)
-
-        # عقوبة اختلاف الحجم (إذا كلاهما معروف)
-        if comp_size and item["size"] and comp_size != item["size"]:
-            score = max(0, score - 8)
-
-        # تفريق التستر من الأصلي
-        same_tester_status = (comp_is_tester == item["is_tester"])
-
-        if same_tester_status:
-            if score > best_same_score:
-                best_same_score = score
-                best_same_item = item
-        else:
-            if score > best_variant_score:
-                best_variant_score = score
-                best_variant_item = item
-
-    # — تقييم النتائج —
-    # تطابق مؤكد (نفس النوع: تستر/أساسي)
-    if best_same_score >= CONFIRMED_THRESHOLD:
-        return True, best_same_score, f"✅ متطابق: {best_same_item['raw'][:60]}", None
-
-    # منطقة مشبوهة
-    if best_same_score >= SIMILAR_THRESHOLD:
-        vinfo = {
-            "type": "similar",
-            "product": best_same_item["raw"] if best_same_item else "",
-            "score": best_same_score
-        }
-        return False, best_same_score, f"⚠️ مشابه ({best_same_score:.0f}%): {best_same_item['raw'][:60]}", vinfo
-
-    # كشف التستر/الأساسي المتوفر
-    variant_info = None
-    if best_variant_score >= 55 and best_variant_item:
-        v_type = "tester" if best_variant_item["is_tester"] else "base"
-        variant_info = {
-            "type": v_type,
-            "label": "🏷️ يتوفر لدينا تستر منه" if v_type == "tester" else "✅ يتوفر لدينا العطر الأساسي",
-            "product": best_variant_item["raw"],
-            "score": best_variant_score,
-        }
-
-    return False, best_same_score, "", variant_info
-
-
-# ══════════════════════════════════════════════════════════════
-#  الطبقة 4: (اختياري) تحقق AI عبر Gemini
-# ══════════════════════════════════════════════════════════════
-
-_gemini_key_idx = 0
-
-def _call_gemini(prompt: str, temperature: float = 0.1) -> Optional[str]:
-    """استدعاء Gemini API مع تدوير المفاتيح."""
-    global _gemini_key_idx
-    if not GEMINI_API_KEYS:
-        return None
-
-    url_base = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-
-    for attempt in range(min(len(GEMINI_API_KEYS), 3)):
-        key = GEMINI_API_KEYS[_gemini_key_idx % len(GEMINI_API_KEYS)]
-        _gemini_key_idx += 1
-
+def get_hybrid_score(name1: str, name2: str, tfidf_matrix=None, idx1=None, idx2=None) -> float:
+    """حساب درجة التشابه الهجين (Fuzzy + TF-IDF)."""
+    n1 = normalize_arabic(name1)
+    n2 = normalize_arabic(name2)
+    
+    # 1. Fuzzy Matching (RapidFuzz)
+    token_sort = fuzz.token_sort_ratio(n1, n2)
+    partial_ratio = fuzz.partial_ratio(n1, n2)
+    fuzzy_score = (token_sort * 0.6) + (partial_ratio * 0.4)
+    
+    # 2. TF-IDF Cosine Similarity
+    cosine_score = 0
+    if tfidf_matrix is not None and idx1 is not None and idx2 is not None:
         try:
-            resp = requests.post(
-                f"{url_base}?key={key}",
-                json={
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {
-                        "temperature": temperature,
-                        "maxOutputTokens": 500,
-                    }
-                },
-                timeout=15
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                return data["candidates"][0]["content"]["parts"][0]["text"]
-            elif resp.status_code == 429:
-                time.sleep(1)
-                continue
-        except Exception:
-            continue
-    return None
+            sim = cosine_similarity(tfidf_matrix[idx1], tfidf_matrix[idx2])
+            cosine_score = sim[0][0] * 100
+        except:
+            cosine_score = 0
+        
+    if cosine_score > 0:
+        return (fuzzy_score * 0.5) + (cosine_score * 0.5)
+    return fuzzy_score
 
+async def ai_deep_verify(prod_name: str, comp_name: str) -> Tuple[bool, str]:
+    """التحقق الدقيق باستخدام LLM للتفريق بين المنتجات المتشابهة."""
+    if not GEMINI_API_KEY:
+        return False, "API Key Missing"
+    
+    prompt = f"""
+    بصفتك خبير في العطور، هل هذين المنتجين هما نفس المنتج تماماً؟
+    انتبه بدقة للفروقات التالية:
+    1. الحجم (مثلاً 50ml vs 100ml) -> مختلفين.
+    2. التركيز (EDP, EDT, Parfum) -> مختلفين.
+    3. النوع (عطر عادي، تستر Tester، عطر شعر Hair Mist) -> مختلفين.
+    4. المجموعات (Set) مقابل العلب المنفردة -> مختلفين.
 
-def ai_verify_batch(items: List[Dict], our_sample: List[str]) -> Dict[str, str]:
+    المنتج 1: {prod_name}
+    المنتج 2: {comp_name}
+
+    أجب بصيغة JSON فقط:
+    {{"is_match": true/false, "reason": "سبب موجز بالعربية"}}
     """
-    تحقق AI لدفعة من المنتجات المشبوهة.
-    يُعيد: {product_name: "same"|"different"|"unsure"}
-    """
-    if not GEMINI_API_KEYS or not items:
-        return {}
-
-    lines = []
-    for i, item in enumerate(items[:10]):  # حد أقصى 10 لكل دفعة
-        lines.append(f"{i+1}. منتج المنافس: {item.get('comp', '')}")
-        lines.append(f"   أقرب منتج لدينا: {item.get('our', '')}")
-
-    prompt = f"""أنت خبير عطور. لكل زوج، حدد: هل المنتجان هما نفس العطر؟
-الإجابة JSON فقط بدون أي نص آخر:
-{{"results": [{{"index":1,"verdict":"same"|"different"|"unsure","reason":"..."}}]}}
-
-{chr(10).join(lines)}
-
-تذكر: الأسماء قد تكون بالعربي والإنجليزي، "تستر" ≠ "أصلي" (مختلفان)،
-"EDP" ≠ "EDT" (مختلفان)، "50ml" ≠ "100ml" (مختلفان في الحجم فقط).
-"""
-    txt = _call_gemini(prompt)
-    if not txt:
-        return {}
-
+    
     try:
-        # تنظيف الرد (أحياناً يكون ملفوفاً بعلامات كود)
-        clean = re.sub(r'```json|```', '', txt).strip()
-        data = json.loads(clean)
-        result = {}
-        for r in data.get("results", []):
-            idx = r.get("index", 0)
-            if 1 <= idx <= len(items):
-                result[items[idx-1].get("comp", "")] = r.get("verdict", "unsure")
-        return result
-    except Exception:
-        return {}
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = await asyncio.to_thread(model.generate_content, prompt)
+        res_text = response.text
+        res_text = re.sub(r'```json\s*|\s*```', '', res_text).strip()
+        data = json.loads(res_text)
+        return data.get("is_match", False), data.get("reason", "")
+    except Exception as e:
+        return False, f"AI Error: {str(e)}"
 
-
-# ══════════════════════════════════════════════════════════════
-#  الطبقة 5: نظام الأسماء البديلة (Alias Memory)
-# ══════════════════════════════════════════════════════════════
-
-def load_aliases(path: str = "aliases.json") -> Dict[str, str]:
-    """تحميل ملف الربط المحفوظ."""
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-
-def save_alias(comp_name: str, our_name: str, path: str = "aliases.json"):
-    """حفظ ربط جديد."""
-    aliases = load_aliases(path)
-    key = normalize_bare(comp_name)
-    aliases[key] = our_name
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(aliases, f, ensure_ascii=False, indent=2)
-
-
-def check_alias(comp_name: str, path: str = "aliases.json") -> Optional[str]:
-    """التحقق من وجود ربط محفوظ."""
-    aliases = load_aliases(path)
-    key = normalize_bare(comp_name)
-    return aliases.get(key)
-
-
-# ══════════════════════════════════════════════════════════════
-#  الدالة الرئيسية: معالجة جميع المنافسين
-# ══════════════════════════════════════════════════════════════
-
-def process_competitors(
-    mahwous_df: pd.DataFrame,
-    competitors_data: Dict[str, pd.DataFrame],
-    use_ai: bool = False,
-    progress_callback=None,
-) -> pd.DataFrame:
-    """
-    معالجة جميع منتجات المنافسين وتصنيفها إلى:
-    - مفقود مؤكد (🟢 green)
-    - مفقود محتمل / يحتاج مراجعة (🟡 yellow)
-    - مشبوه / محظور الإرسال (🔴 red)
-    - موجود / متطابق (found)
-    """
-    # تجهيز منتجاتنا
-    our_items = _prepare_our_items(mahwous_df)
-    if not our_items:
+def process_competitors(mahwous_df: pd.DataFrame, competitor_files_data: Dict[str, pd.DataFrame], progress_callback=None) -> pd.DataFrame:
+    """المعالجة الأساسية للمنافسين باستخدام النظام الهجين."""
+    if mahwous_df.empty or not competitor_files_data:
         return pd.DataFrame()
 
+    # تجميع كل منتجات المنافسين في DataFrame واحد
+    all_comp_list = []
+    for comp_name, df in competitor_files_data.items():
+        df['competitor_name'] = comp_name
+        all_comp_list.append(df)
+    
+    competitor_df = pd.concat(all_comp_list, ignore_index=True)
+    
+    # تحضير TF-IDF
+    all_names = mahwous_df['product_name'].astype(str).tolist() + competitor_df['product_name'].astype(str).tolist()
+    vectorizer = TfidfVectorizer(preprocessor=normalize_arabic)
+    tfidf_matrix = vectorizer.fit_transform(all_names)
+    mahwous_len = len(mahwous_df)
+
     results = []
-    seen_bare = set()  # لمنع التكرار بين المنافسين
-    total_products = sum(len(df) for df in competitors_data.values())
-    processed = 0
-
-    for comp_name, comp_df in competitors_data.items():
-        for _, row in comp_df.iterrows():
-            processed += 1
-            if progress_callback and processed % 10 == 0:
-                progress_callback(processed, total_products, "")
-
-            cp = str(row.get("name", "")).strip()
-            if not cp or is_sample(cp):
-                continue
-
-            # — التطبيع —
-            cp_norm = normalize_aggressive(cp)
-            cp_bare = normalize_bare(cp)
-            if not cp_bare or len(cp_bare) < 3:
-                continue
-
-            # — إزالة التكرار بين المنافسين —
-            bare_key = cp_bare
-            if bare_key in seen_bare:
-                continue
-
-            # — التحقق من الأسماء البديلة المحفوظة —
-            alias = check_alias(cp)
-            if alias:
-                # هذا المنتج تم تأكيده سابقاً كموجود
-                results.append({
-                    "product_name": cp,
-                    "price": float(row.get("price", 0) or 0),
-                    "image_url": str(row.get("image_url", "")),
-                    "product_url": str(row.get("product_url", "")),
-                    "brand": extract_brand(cp),
-                    "size": f"{extract_size(cp)}ml" if extract_size(cp) else "",
-                    "type": extract_type(cp),
-                    "is_tester": is_tester(cp),
-                    "is_set": is_set(cp),
-                    "confidence_score": 95.0,
-                    "confidence_level": "found",
-                    "competitor_name": comp_name,
-                    "matched_product": alias,
-                    "note": "✅ تم تأكيده مسبقاً (Alias)",
-                    "variant_info": "",
-                    "variant_product": "",
-                    "detection_date": datetime.now().strftime("%Y-%m-%d"),
-                })
-                seen_bare.add(bare_key)
-                continue
-
-            # — المطابقة متعددة الطبقات —
-            c_brand = extract_brand(cp)
-            c_size = extract_size(cp)
-            c_type = extract_type(cp)
-            c_is_tester = is_tester(cp)
-
-            found, score, reason, variant = _find_best_match(
-                cp, cp_norm, cp_bare, c_brand, c_size, c_type, c_is_tester, our_items
-            )
-
-            if found:
-                results.append({
-                    "product_name": cp,
-                    "price": float(row.get("price", 0) or 0),
-                    "image_url": str(row.get("image_url", "")),
-                    "product_url": str(row.get("product_url", "")),
-                    "brand": c_brand,
-                    "size": f"{c_size}ml" if c_size else "",
-                    "type": c_type,
-                    "is_tester": c_is_tester,
-                    "is_set": is_set(cp),
-                    "confidence_score": score,
-                    "confidence_level": "found",
-                    "competitor_name": comp_name,
-                    "matched_product": reason,
-                    "note": reason,
-                    "variant_info": "",
-                    "variant_product": "",
-                    "detection_date": datetime.now().strftime("%Y-%m-%d"),
-                })
-                seen_bare.add(bare_key)
-                continue
-
-            # — Cross-check إضافي: token_set_ratio مباشر —
-            cross_found = False
-            for item in our_items:
-                direct = fuzz.token_set_ratio(cp_bare, item["bare"])
-                if direct >= DIRECT_MATCH_THRESHOLD:
-                    cross_found = True
-                    results.append({
-                        "product_name": cp,
-                        "price": float(row.get("price", 0) or 0),
-                        "image_url": str(row.get("image_url", "")),
-                        "product_url": str(row.get("product_url", "")),
-                        "brand": c_brand,
-                        "size": f"{c_size}ml" if c_size else "",
-                        "type": c_type,
-                        "is_tester": c_is_tester,
-                        "is_set": is_set(cp),
-                        "confidence_score": direct,
-                        "confidence_level": "found",
-                        "competitor_name": comp_name,
-                        "matched_product": f"✅ متطابق مباشر: {item['raw'][:60]}",
-                        "note": f"✅ متطابق مباشر ({direct}%)",
-                        "variant_info": "",
-                        "variant_product": "",
-                        "detection_date": datetime.now().strftime("%Y-%m-%d"),
-                    })
-                    break
-            if cross_found:
-                seen_bare.add(bare_key)
-                continue
-
-            # — تصنيف مستوى الثقة —
-            _has_similar = bool(reason and "⚠️" in reason)
-            _has_variant = bool(variant)
-
-            if score < 40 and not _has_variant and not _has_similar:
-                conf_level = "green"      # مفقود مؤكد
-            elif score < 55 and not _has_similar:
-                conf_level = "green"      # مفقود مؤكد
-            elif _has_similar or (55 <= score < 68):
-                conf_level = "yellow"     # يحتاج مراجعة
-            elif _has_variant and variant.get("type") == "similar":
-                conf_level = "red"        # مشبوه
-            else:
-                conf_level = "green"
-
-            results.append({
-                "product_name": cp,
-                "price": float(row.get("price", 0) or 0),
-                "image_url": str(row.get("image_url", "")),
-                "product_url": str(row.get("product_url", "")),
-                "brand": c_brand,
-                "size": f"{c_size}ml" if c_size else "",
-                "type": c_type,
-                "is_tester": c_is_tester,
-                "is_set": is_set(cp),
-                "confidence_score": score,
-                "confidence_level": conf_level,
-                "competitor_name": comp_name,
-                "matched_product": "",
-                "note": reason if reason else "",
-                "variant_info": variant.get("label", "") if variant else "",
-                "variant_product": variant.get("product", "") if variant else "",
-                "detection_date": datetime.now().strftime("%Y-%m-%d"),
-            })
-            seen_bare.add(bare_key)
-
-    if progress_callback:
-        progress_callback(total_products, total_products, "✅")
-
-    return pd.DataFrame(results) if results else pd.DataFrame()
+    total = len(competitor_df)
+    
+    for i, comp_row in competitor_df.iterrows():
+        if progress_callback:
+            progress_callback(i + 1, total, f"تحليل {comp_row['product_name'][:30]}...")
+            
+        comp_name_str = str(comp_row['product_name'])
+        comp_idx = mahwous_len + i
+        
+        best_score = 0
+        best_match_idx = -1
+        
+        for j, mah_row in mahwous_df.iterrows():
+            score = get_hybrid_score(comp_name_str, str(mah_row['product_name']), tfidf_matrix, comp_idx, j)
+            if score > best_score:
+                best_score = score
+                best_match_idx = j
+        
+        status = "Confirmed Missing"
+        confidence = "green"
+        match_name = ""
+        
+        if best_score > 90:
+            status = "Exact Duplicate"
+            confidence = "red"
+            match_name = mahwous_df.iloc[best_match_idx]['product_name']
+        elif best_score > 60:
+            status = "Potential Match"
+            confidence = "yellow"
+            match_name = mahwous_df.iloc[best_match_idx]['product_name']
+        
+        res_row = comp_row.to_dict()
+        res_row.update({
+            "status": status,
+            "confidence_level": confidence,
+            "match_name": match_name,
+            "confidence_score": best_score,
+            "detection_date": datetime.now().strftime("%Y-%m-%d")
+        })
+        results.append(res_row)
+        
+    return pd.DataFrame(results)
