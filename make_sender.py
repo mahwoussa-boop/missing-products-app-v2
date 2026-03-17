@@ -1,14 +1,14 @@
 """
-make_sender.py — مدير الإرسال لأتمتة Make.com
+make_sender.py v13.1 — مدير الإرسال لأتمتة Make.com (مستعاد ومحسن)
 ═══════════════════════════════════════════════════════════════
-- تم ضبطه ليستقبل (الاسم، السعر، الصورة المسحوبة، والوصف المولد).
-- يرسل البيانات بصيغة مصفوفة {"data": [...]} المطابقة لسيناريو مهووس.
-- حماية ضد الأخطاء لكي لا يتوقف السيناريو.
+- تم استعادة الكود الأصلي بالكامل لضمان توافق هيكلة {"data": [...]} مع سيناريو مهووس.
+- الحفاظ على المفاتيح العربية ("أسم المنتج"، "سعر المنتج"، "الوصف"، "صورة المنتج").
+- يتضمن نظام التقاط الأخطاء (Try/Except) ليعرض سبب العطل للمستخدم بدلاً من توقف التطبيق.
 """
 
 import requests
 import os
-from typing import List, Dict
+from typing import List, Dict, Any
 
 # رابط Webhook الخاص بسيناريو المنتجات المفقودة في Make
 WEBHOOK_URL = os.environ.get(
@@ -16,7 +16,7 @@ WEBHOOK_URL = os.environ.get(
     "https://hook.eu2.make.com/xvubj23dmpxu8qzilstd25cnumrwtdxm" # تأكد من أن هذا الرابط هو الصحيح لسيناريو مهووس
 )
 
-def send_products_to_make(products: List[Dict]) -> Dict:
+def send_products_to_make(products: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     إرسال المنتجات المفقودة لإضافتها في سلة عبر Make.
     """
@@ -80,5 +80,7 @@ def send_products_to_make(products: List[Dict]) -> Dict:
             
     except requests.exceptions.Timeout:
         return {"success": False, "message": "❌ انتهت مهلة الاتصال بخادم Make"}
+    except requests.exceptions.ConnectionError:
+        return {"success": False, "message": "❌ فشل الاتصال بالخادم. يرجى التحقق من اتصال الإنترنت."}
     except Exception as e:
         return {"success": False, "message": f"❌ خطأ في الاتصال: {str(e)[:100]}"}
