@@ -1,9 +1,8 @@
 """
-db_manager.py v5.0 — مدير تحميل البيانات (Memory-Only)
+db_manager.py v5.3 — مدير تحميل البيانات (Smarter Detection)
 ═══════════════════════════════════════════════════
-- تحميل ذكي لملف مهووس وملفات المنافسين
-- كشف تلقائي للأعمدة
-- لا يعتمد على SQLite، يعتمد كلياً على Session State
+- كشف ذكي للأعمدة يتوافق مع ملفات Salla المجمعة (Scraped Data)
+- معالجة آمنة للبيانات الناقصة لتجنب الانهيارات الصامتة
 """
 
 import pandas as pd
@@ -25,33 +24,49 @@ def load_mahwous_store_data(uploaded_file) -> pd.DataFrame:
             "الماركة": "brand", "الوصف": "description"
         }
         df.rename(columns=rename_map, inplace=True)
-        return df.dropna(subset=["product_name"])
+        return df.dropna(subset=["product_name"]) if "product_name" in df.columns else pd.DataFrame()
     except Exception as e:
         st.error(f"Error loading store data: {e}")
         return pd.DataFrame()
 
 def load_competitor_data(uploaded_file) -> pd.DataFrame:
-    """تحميل بيانات المنافس (متوافق مع CSV)."""
+    """تحميل بيانات المنافس مع كشف ذكي للأعمدة (Salla Scraper Compatibility)."""
     if uploaded_file is None: return pd.DataFrame()
     try:
         df = pd.read_csv(uploaded_file, encoding="utf-8-sig")
-        # كشف تلقائي مبسط للأعمدة
-        for col in df.columns:
-            col_lower = col.lower()
-            if any(x in col_lower for x in ["اسم", "product", "name", "title"]): 
-                df.rename(columns={col: "product_name"}, inplace=True)
-            if any(x in col_lower for x in ["سعر", "price"]): 
-                df.rename(columns={col: "price"}, inplace=True)
-            if any(x in col_lower for x in ["صورة", "image", "img"]): 
-                df.rename(columns={col: "image_url"}, inplace=True)
-            if any(x in col_lower for x in ["ماركة", "brand"]): 
-                df.rename(columns={col: "brand"}, inplace=True)
         
+        # كشف تلقائي ذكي للأعمدة بناءً على الكلمات المفتاحية
+        mapping = {
+            "product_name": ["اسم", "product", "name", "title"],
+            "price": ["سعر", "price", "text-sm", "amount"],
+            "image_url": ["صورة", "image", "img", "src", "thumbnail"],
+            "brand": ["ماركة", "brand"]
+        }
+        
+        detected_cols = {}
+        for internal_name, keywords in mapping.items():
+            for col in df.columns:
+                col_lower = str(col).lower()
+                if any(kw in col_lower for kw in keywords):
+                    detected_cols[col] = internal_name
+                    break # نأخذ أول تطابق لكل عمود داخلي
+        
+        df.rename(columns=detected_cols, inplace=True)
+        
+        # التأكد من وجود عمود الاسم على الأقل
         if "product_name" not in df.columns:
-            st.warning(f"⚠️ لم يتم العثور على عمود الاسم في {uploaded_file.name}")
+            st.warning(f"⚠️ لم يتم التعرف على عمود الاسم في {uploaded_file.name}. الأعمدة المتاحة: {list(df.columns)}")
             return pd.DataFrame()
             
-        return df.dropna(subset=["product_name"])
+        # معالجة آمنة للبيانات الناقصة
+        # نستخدم fillna بدلاً من dropna مباشرة لتجنب حذف كافة الصفوف إذا فشل الكشف عن عمود معين
+        for col in ["price", "image_url", "brand"]:
+            if col not in df.columns:
+                df[col] = 0.0 if col == "price" else ""
+        
+        # حذف الصفوف التي ليس لها اسم منتج فقط
+        return df.dropna(subset=["product_name"]).copy()
+        
     except Exception as e:
         st.error(f"Error loading competitor data: {e}")
         return pd.DataFrame()
