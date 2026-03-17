@@ -1,10 +1,9 @@
 """
-app.py v6.0 — واجهة المستخدم التفاعلية (Visual Comparison & Live Progress)
+app.py v7.0 — واجهة المستخدم التفاعلية (Ultra-Fast Edition)
 ═══════════════════════════════════════════════════════════
 - تصميم عريض وتفاعلي مع مقارنة بصرية (صورة بصورة)
-- إصلاح ظهور شريط التقدم فور بدء التحليل
-- معالجة في الخلفية (Threading)
-- تحديث التقدم لحظياً (Live Updates)
+- متوافق تماماً مع المحرك الصاروخي الجديد (v7.0)
+- تحديث التقدم لحظياً (Live Updates) بدون تجميد
 """
 
 import streamlit as st
@@ -75,7 +74,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 def main():
-    st.markdown(f'<div class="main-header"><h1>{APP_ICON} {APP_TITLE}</h1><p>{APP_VERSION} | نظام ذكاء الأعمال للمنافسين - معالجة فائقة السرعة</p></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="main-header"><h1>{APP_ICON} {APP_TITLE}</h1><p>الإصدار v7.0 | نظام ذكاء الأعمال للمنافسين - معالجة صاروخية</p></div>', unsafe_allow_html=True)
 
     # الشريط الجانبي
     with st.sidebar:
