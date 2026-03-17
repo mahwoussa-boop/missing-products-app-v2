@@ -1,10 +1,9 @@
 """
-app.py v7.0 — الواجهة الذكية المتفاعلة (Smart Interactive Dashboard)
+app.py v7.5 — الواجهة الذكية المتفاعلة (Smart Interactive Dashboard)
 ══════════════════════════════════════════════════════════════════════
 - تصميم عصري يركز على "المقارنة البصرية" والتدقيق اليدوي السريع.
 - أزرار ذكاء اصطناعي تفاعلية لكل منتج (إضافة، تجاهل، إعادة تحقق).
-- نظام "التحقق المزدوج" (Double-Check) لضمان دقة 100%.
-- عرض جانبي (Side-by-Side) لمنتج المنافس مقابل منتجنا المطابق.
+- شريط تقدم مباشر يعمل بكفاءة ولا يتجمد.
 """
 
 import streamlit as st
@@ -26,7 +25,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# 2. تهيئة Session State للتحكم الكامل
+# 2. تهيئة Session State للتحكم الكامل وشريط التقدم
 if 'analysis_running' not in st.session_state: st.session_state.analysis_running = False
 if 'processed_count' not in st.session_state: st.session_state.processed_count = 0
 if 'total_count' not in st.session_state: st.session_state.total_count = 0
@@ -128,7 +127,10 @@ def main():
         st.divider()
         if st.button("🚀 بدء التحليل السيادي", type="primary", use_container_width=True, disabled=st.session_state.analysis_running):
             if mahwous_file and competitor_files:
-                with st.spinner("جاري تهيئة محرك المطابقة..."):
+                # تفعيل حالة التشغيل لكي يظهر شريط التقدم فوراً
+                st.session_state.analysis_running = True
+                
+                with st.spinner("جاري تهيئة محرك المطابقة وتحميل البيانات..."):
                     m_df = load_mahwous_store_data(mahwous_file)
                     c_data = {f.name: load_competitor_data(f) for f in competitor_files}
                     # تشغيل التحليل
@@ -142,15 +144,23 @@ def main():
                 st.session_state.analysis_running = False
                 st.rerun()
 
-    # عرض التقدم المباشر
-    if st.session_state.analysis_running:
-        progress = st.session_state.processed_count / st.session_state.total_count if st.session_state.total_count > 0 else 0
-        st.progress(progress, text=f"جاري الفحص الذكي: {st.session_state.processed_count} / {st.session_state.total_count}")
-        time.sleep(1.5)
-        st.rerun()
+    # ==========================================
+    # إظهار شريط التقدم المباشر (Progress Bar)
+    # ==========================================
+    if st.session_state.analysis_running or st.session_state.processed_count > 0:
+        if st.session_state.total_count > 0:
+            progress = min(st.session_state.processed_count / st.session_state.total_count, 1.0)
+            st.progress(progress, text=f"جاري الفحص الذكي: {st.session_state.processed_count} من {st.session_state.total_count} منتج...")
+            
+            # تحديث الواجهة إذا كان التحليل لا يزال جارياً
+            if st.session_state.analysis_running:
+                time.sleep(0.5)
+                st.rerun()
 
+    # ==========================================
     # لوحة التحكم بالنتائج
-    if st.session_state.analysis_results:
+    # ==========================================
+    if not st.session_state.analysis_running and st.session_state.analysis_results:
         df = pd.DataFrame(st.session_state.analysis_results)
         df = df[~df['product_name'].isin(st.session_state.ignore_list)]
         
