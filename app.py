@@ -1,10 +1,9 @@
 """
-app.py v5.0 — واجهة المستخدم التفاعلية (Memory-Only)
+app.py v5.1 — واجهة المستخدم التفاعلية مع صور المقارنة
 ═══════════════════════════════════════════════════════════
-- تصميم عريض وتفاعلي
-- معالجة في الخلفية (Threading)
+- تصميم عريض وتفاعلي مع صور مقارنة (Side-by-Side)
+- معالجة في الخلفية (Threading) مع إصلاح التزامن
 - تحديث التقدم لحظياً (Live Updates)
-- لا يعتمد على SQLite، يعتمد كلياً على Session State
 """
 
 import streamlit as st
@@ -71,6 +70,27 @@ st.markdown("""
         border-radius: 0.5rem;
         font-weight: 600;
     }
+    .image-container {
+        display: flex;
+        gap: 1rem;
+        justify-content: center;
+        align-items: center;
+        flex-wrap: wrap;
+    }
+    .product-img {
+        max-width: 140px;
+        height: 140px;
+        object-fit: contain;
+        border-radius: 0.5rem;
+        border: 1px solid #e2e8f0;
+        background: #f8fafc;
+    }
+    .img-label {
+        font-size: 0.75rem;
+        color: #64748b;
+        margin-bottom: 0.25rem;
+        text-align: center;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -133,14 +153,24 @@ def main():
                 filtered = df[df['confidence_level'] == level]
                 for _, row in filtered.iterrows():
                     with st.container():
+                        # تجهيز صور المقارنة
+                        comp_img = row.get('image_url', '')
+                        match_img = row.get('match_image', '')
+                        
                         st.markdown(f"""
                         <div class="product-card">
-                            <div style="display: flex; gap: 2rem; align-items: start;">
-                                <div style="flex: 1; text-align: center;">
-                                    <p style="font-size: 0.8rem; color: #64748b;">صورة المنافس</p>
-                                    <img src="{row.get('image_url', '')}" style="width: 150px; border-radius: 0.5rem; border: 1px solid #e2e8f0;">
+                            <div style="display: flex; gap: 2rem; align-items: start; flex-wrap: wrap;">
+                                <div class="image-container" style="flex: 1.5; min-width: 300px;">
+                                    <div>
+                                        <p class="img-label">صورة المنافس</p>
+                                        <img src="{comp_img}" class="product-img">
+                                    </div>
+                                    <div>
+                                        <p class="img-label">أقرب مطابقة لدينا</p>
+                                        <img src="{match_img}" class="product-img">
+                                    </div>
                                 </div>
-                                <div style="flex: 3;">
+                                <div style="flex: 3; min-width: 300px;">
                                     <span class="badge badge-{row['confidence_level']}">{row['status']}</span>
                                     <h3 style="margin: 0.5rem 0;">{row['product_name']}</h3>
                                     <p style="color: #3b82f6; font-weight: 700; font-size: 1.2rem;">{row['price']} ر.س</p>
@@ -148,14 +178,14 @@ def main():
                                     <hr style="margin: 1rem 0; border: 0; border-top: 1px solid #e2e8f0;">
                                     <p><b>أقرب مطابقة لدينا:</b> {row.get('match_name', 'لا يوجد')}</p>
                                 </div>
-                                <div style="flex: 1; display: flex; flex-direction: column; gap: 0.5rem;">
+                                <div style="flex: 1; display: flex; flex-direction: column; gap: 0.5rem; min-width: 150px;">
                                     <p style="text-align: center; font-weight: 700;">الإجراءات</p>
                                 </div>
                             </div>
                         </div>
                         """, unsafe_allow_html=True)
                         
-                        # أزرار الإجراءات (خارج الـ HTML لتعمل مع Streamlit)
+                        # أزرار الإجراءات
                         btn_cols = st.columns([4, 1.5, 1.5, 1.5])
                         with btn_cols[1]:
                             if st.button("✅ أضف لـ Make", key=f"make_{row['product_name']}"):

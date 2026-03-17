@@ -1,10 +1,8 @@
 """
-ai_matcher.py v5.0 — محرك المطابقة المتوازي (Memory-Only)
+ai_matcher.py v5.1 — إصلاح التزامن ودعم صور المقارنة
 ═══════════════════════════════════════════════════════════════
-- نظام مطابقة متعدد الطبقات (Tiered Pipeline)
-- معالجة متوازية (Async Batching) باستخدام asyncio
-- تخزين النتائج مباشرة في st.session_state
-- لا يعتمد على SQLite، يعتمد كلياً على ذاكرة التطبيق
+- إصلاح تجميد Streamlit عبر تحديث Session State خارج المهام غير المتزامنة
+- إضافة صورة المنتج المطابق (Match Image) للنتائج للمقارنة البصرية
 """
 
 import re
@@ -82,14 +80,14 @@ def get_hybrid_score(name1: str, name2: str, tfidf_matrix=None, idx1=None, idx2=
         except: pass
     return fuzzy_score
 
-async def process_item_pipeline(comp_row: Dict, mahwous_df: pd.DataFrame, tfidf_matrix, comp_idx: int, mahwous_len: int):
-    """خط أنابيب معالجة منتج واحد (متعدد الطبقات)."""
+async def process_item_pipeline(comp_row: Dict, mahwous_df: pd.DataFrame, tfidf_matrix, comp_idx: int, mahwous_len: int) -> Dict:
+    """خط أنابيب معالجة منتج واحد (يعيد النتيجة ولا يحدث الحالة مباشرة)."""
     comp_name = comp_row['product_name']
     
     best_score = 0
     best_match_idx = -1
     
-    # Tier 1 & 2: Instant & Fast Heuristics
+    # الطبقة الأولى والثانية: البحث السريع
     for j, mah_row in mahwous_df.iterrows():
         score = get_hybrid_score(comp_name, mah_row['product_name'], tfidf_matrix, comp_idx, j)
         if score > best_score:
@@ -100,41 +98,39 @@ async def process_item_pipeline(comp_row: Dict, mahwous_df: pd.DataFrame, tfidf_
     status = "Confirmed Missing"
     confidence = "green"
     match_name = ""
+    match_image = ""
     
-    if best_score > 95:
-        status = "Exact Duplicate"
-        confidence = "red"
-        match_name = mahwous_df.iloc[best_match_idx]['product_name']
-    elif best_score > 50:
-        # Tier 3: Concurrent AI Verification
-        ai_res = await ai_deep_verify_single(comp_name, mahwous_df.iloc[best_match_idx]['product_name'])
-        if ai_res.get("is_match"):
+    if best_match_idx != -1:
+        match_image = mahwous_df.iloc[best_match_idx].get('image_url', '')
+        
+        if best_score > 95:
             status = "Exact Duplicate"
             confidence = "red"
             match_name = mahwous_df.iloc[best_match_idx]['product_name']
-        else:
-            status = "Potential Match"
-            confidence = "yellow"
-            match_name = f"{mahwous_df.iloc[best_match_idx]['product_name']} ({ai_res.get('reason')})"
+        elif best_score > 50:
+            # الطبقة الثالثة: التحقق بالذكاء الاصطناعي
+            ai_res = await ai_deep_verify_single(comp_name, mahwous_df.iloc[best_match_idx]['product_name'])
+            if ai_res.get("is_match"):
+                status = "Exact Duplicate"
+                confidence = "red"
+                match_name = mahwous_df.iloc[best_match_idx]['product_name']
+            else:
+                status = "Potential Match"
+                confidence = "yellow"
+                match_name = f"{mahwous_df.iloc[best_match_idx]['product_name']} ({ai_res.get('reason')})"
     
-    # حفظ النتيجة في Session State فور معالجتها
-    res = {
+    return {
         **comp_row,
         "status": status,
         "confidence_level": confidence,
         "match_name": match_name,
+        "match_image": match_image,
         "confidence_score": best_score,
         "detection_date": datetime.now().strftime("%Y-%m-%d")
     }
-    
-    # إضافة النتيجة إلى القائمة في session_state
-    if 'analysis_results' not in st.session_state:
-        st.session_state.analysis_results = []
-    st.session_state.analysis_results.append(res)
-    st.session_state.processed_count += 1
 
 async def background_analysis_task(mahwous_df: pd.DataFrame, competitor_files_data: Dict[str, pd.DataFrame]):
-    """المهمة الخلفية لمعالجة كافة المنتجات."""
+    """المهمة الخلفية لمعالجة كافة المنتجات مع تحديث آمن للحالة."""
     all_comp_list = []
     for comp_name, df in competitor_files_data.items():
         df['competitor_name'] = comp_name
@@ -160,7 +156,12 @@ async def background_analysis_task(mahwous_df: pd.DataFrame, competitor_files_da
         for idx, row in batch.iterrows():
             tasks.append(process_item_pipeline(row.to_dict(), mahwous_df, tfidf_matrix, mahwous_len + idx, mahwous_len))
         
-        await asyncio.gather(*tasks)
+        # جمع نتائج الدفعة بشكل آمن
+        batch_results = await asyncio.gather(*tasks)
+        
+        # تحديث الحالة في Streamlit خارج المهام غير المتزامنة
+        st.session_state.analysis_results.extend(batch_results)
+        st.session_state.processed_count += len(batch_results)
         
     st.session_state.analysis_running = False
 
