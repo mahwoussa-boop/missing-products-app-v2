@@ -59,14 +59,23 @@ class AIMatcher:
     def __init__(self, mahwous_df: pd.DataFrame):
         self.mahwous_df = mahwous_df
         if not self.mahwous_df.empty:
-            # إصلاح: إنشاء العمود المنظف برمجياً قبل استخدامه
             if 'normalized_name' not in self.mahwous_df.columns:
                 self.mahwous_df['normalized_name'] = self.mahwous_df['product_name'].apply(normalize_product_name)
                 
+            # --- الإصلاح الجذري لمعالجة النصوص الفارغة ---
+            # حقن قيمة افتراضية للنصوص التي أصبحت فارغة بعد التنظيف
+            self.mahwous_df['normalized_name'] = self.mahwous_df['normalized_name'].replace(r'^\s*$', 'منتج_بدون_اسم', regex=True).fillna('منتج_بدون_اسم')
+            
             self.mahwous_names = self.mahwous_df['normalized_name'].tolist()
-            # تجهيز TF-IDF لتسريع عمليات البحث الأولية
             self.vectorizer = TfidfVectorizer(analyzer='char_wb', ngram_range=(2, 4))
-            self.tfidf_matrix = self.vectorizer.fit_transform(self.mahwous_names)
+            
+            # حماية المحرك بـ Try/Except
+            try:
+                self.tfidf_matrix = self.vectorizer.fit_transform(self.mahwous_names)
+            except ValueError:
+                # خطة طوارئ في حال فشل استخراج الميزات
+                self.mahwous_names = ['منتج_غير_معروف'] * len(self.mahwous_names)
+                self.tfidf_matrix = self.vectorizer.fit_transform(self.mahwous_names)
         else:
             self.mahwous_names = []
 
