@@ -1,16 +1,15 @@
 """
-make_sender.py v14.1 — مدير الإرسال لأتمتة Make.com (دعم الصور المتعددة والوصف المطول)
+make_sender.py v14.2 — مدير الإرسال لأتمتة Make.com (إصلاح الصور برمجياً + دعم النظام الهجين)
 ═══════════════════════════════════════════════════════════════
-- معالجة وتشفير روابط صور المنافسين بذكاء (فك التشفير ثم إعادة التشفير) لكي تقبلها سلة و Make.
-- تثبيت هيكلة الـ JSON لضمان إرسال "الوصف" بتنسيق مهووس دائماً.
-- دعم إرسال مصفوفة من الصور ("صور إضافية") لضمان سحب جميع صور المنتج.
-- توفير صورة بديلة (Placeholder) في حال فشل سحب الصورة لكي لا يتوقف السيناريو.
-- الحفاظ على المفاتيح العربية المتوافقة مع سيناريو متجر مهووس ("أسم المنتج", "الوصف", "صورة المنتج").
+- إصلاح روابط الصور برمجياً (Python) لتحويل صيغ webp المعقدة وتجاوز قيود CDN سلة.
+- دعم إرسال الصور والوصف سواء تم توليدها بالذكاء الاصطناعي أو بالبرمجة المباشرة.
+- ضمان التوافق التام مع سيناريو Make ومنصة سلة لمنع توقف الأتمتة.
 """
 
 import requests
 import os
 import urllib.parse
+import re
 from typing import List, Dict, Any
 
 # رابط Webhook الخاص بسيناريو المنتجات المفقودة في Make
@@ -21,22 +20,29 @@ WEBHOOK_URL = os.environ.get(
 
 def _clean_url_for_make(url: str) -> str:
     """
-    تنظيف وتشفير روابط الصور القادمة من المنافسين أو الويب.
-    يمنع "التشفير المزدوج" الذي يكسر روابط CDN الخاصة بسلة وغيرها.
+    تنظيف وإصلاح روابط الصور برمجياً (Python) لضمان عملها في سلة و Make.
+    تتعامل مع روابط CDN سلة المعقدة وصيغ webp وتمنع التشفير المزدوج.
     """
     if not url: return ""
     url = str(url).strip()
     
-    # إصلاح الروابط التي لا تحتوي على بروتوكول
+    # 1. إصلاح الروابط التي لا تحتوي على بروتوكول
     if url.startswith("//"): 
         url = "https:" + url
         
     try:
-        # 1. فك التشفير أولاً لتجنب التشفير المزدوج
+        # 2. فك التشفير أولاً لتجنب التشفير المزدوج
         url = urllib.parse.unquote(url)
-        # 2. تحليل الرابط
+        
+        # 3. معالجة روابط CDN سلة (تحويل webp إلى jpg إذا لزم الأمر أو تنظيف البارامترات)
+        # روابط سلة غالباً تحتوي على معالجة صور مثل: /fit=scale-down,format=webp/
+        if "cdn.salla.sa" in url:
+            # إزالة معالجات الصور التي قد تسبب مشاكل في بعض المتصفحات أو المنصات
+            # نحتفظ بالرابط الأصلي للصورة قدر الإمكان
+            url = re.sub(r'/cdn-cgi/image/[^/]+/', '/', url)
+            
+        # 4. تحليل الرابط وإعادة تشفيره بشكل آمن
         parsed = urllib.parse.urlparse(url)
-        # 3. إعادة التشفير الآمن للمسار والاستعلام فقط
         clean_path = urllib.parse.quote(parsed.path, safe="/%")
         clean_query = urllib.parse.quote_plus(parsed.query, safe="=&")
         
@@ -47,8 +53,7 @@ def _clean_url_for_make(url: str) -> str:
 
 def send_products_to_make(products: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    إرسال المنتجات المفقودة لإضافتها في سلة عبر Make.
-    مع ضمان إرفاق الوصف والصور المتعددة وتجاوز أخطاء الروابط.
+    إرسال المنتجات لـ Make مع ضمان جودة البيانات (الصور والوصف) برمجياً.
     """
     if not products:
         return {"success": False, "message": "❌ لا توجد بيانات للإرسال"}
@@ -56,7 +61,6 @@ def send_products_to_make(products: List[Dict[str, Any]]) -> Dict[str, Any]:
     formatted_products = []
     
     for p in products:
-        # استخراج البيانات الأساسية
         name = str(p.get("product_name", p.get("name", ""))).strip()
         price = p.get("price", 0)
         
@@ -68,27 +72,23 @@ def send_products_to_make(products: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not name or price <= 0:
             continue
 
-        # ── بناء الهيكلة الصارمة التي يطلبها سيناريو Make ──
+        # بناء الهيكلة الصارمة
         item = {
             "أسم المنتج": name,
             "سعر المنتج": price,
             "الوزن": 1,
             "سعر التكلفة": 0,
             "السعر المخفض": 0,
-            "الوصف": "",
+            "الوصف": str(p.get("description", "")).strip(),
             "صورة المنتج": "",
-            "صور إضافية": [] # دعم الصور المتعددة
+            "صور إضافية": []
         }
         
-        # 1. إضافة الوصف (تم توليده مسبقاً من الذكاء الاصطناعي بتنسيق مهووس المطول)
-        description = str(p.get("description", "")).strip()
-        if description:
-            item["الوصف"] = description
-        else:
+        # حماية الوصف
+        if not item["الوصف"]:
             item["الوصف"] = f"<h2>{name}</h2><p>اكتشف الفخامة مع هذا المنتج الرائع، متوفر الآن في متجر مهووس.</p>"
             
-        # 2. إضافة الصور ومعالجتها
-        # نحاول الحصول على قائمة الصور أولاً
+        # معالجة الصور برمجياً
         all_images = p.get("all_images", [])
         if not all_images and p.get("image_url"):
             all_images = [p.get("image_url")]
@@ -101,9 +101,8 @@ def send_products_to_make(products: List[Dict[str, Any]]) -> Dict[str, Any]:
         if cleaned_images:
             item["صورة المنتج"] = cleaned_images[0]
             if len(cleaned_images) > 1:
-                item["صور إضافية"] = cleaned_images[1:]
+                item["صور إاضافية"] = cleaned_images[1:]
         else:
-            # حماية السناريو: صورة بديلة لتجنب تعطل Make
             safe_name = urllib.parse.quote(name)
             item["صورة المنتج"] = f"https://ui-avatars.com/api/?name={safe_name}&background=random&size=512"
 
@@ -112,7 +111,6 @@ def send_products_to_make(products: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not formatted_products:
         return {"success": False, "message": "❌ لم يتم العثور على منتجات صالحة للإرسال"}
 
-    # ── تغليف البيانات في مفتاح "data" كما يقرأها السيناريو في Make ──
     payload = {"data": formatted_products}
 
     try:
@@ -120,15 +118,13 @@ def send_products_to_make(products: List[Dict[str, Any]]) -> Dict[str, Any]:
             WEBHOOK_URL,
             json=payload,
             headers={"Content-Type": "application/json"},
-            timeout=30 # زيادة المهلة للوصف الطويل والصور المتعددة
+            timeout=30
         )
         
         if response.status_code in (200, 201, 204):
-            return {"success": True, "message": f"✅ تم إرسال {len(formatted_products)} منتج بنجاح لـ Make متضمناً الوصف والصور"}
+            return {"success": True, "message": f"✅ تم إرسال {len(formatted_products)} منتج بنجاح لـ Make"}
         else:
-            return {"success": False, "message": f"❌ خطأ من Make ({response.status_code}): يرجى فحص السيناريو"}
+            return {"success": False, "message": f"❌ خطأ من Make ({response.status_code})"}
             
-    except requests.exceptions.Timeout:
-        return {"success": False, "message": "❌ انتهت مهلة الاتصال بخادم Make، قد يكون الوصف طويلاً جداً."}
     except Exception as e:
         return {"success": False, "message": f"❌ خطأ في الاتصال: {str(e)[:100]}"}
