@@ -1,0 +1,473 @@
+{
+    "name": "Mahwous - إضافة منتجات جديدة لسلة (v7 نهائي)",
+    "flow": [
+        {
+            "id": 1,
+            "module": "gateway:CustomWebHook",
+            "version": 1,
+            "parameters": {
+                "hook": 3871450,
+                "maxResults": 1
+            },
+            "mapper": {},
+            "metadata": {
+                "designer": {
+                    "x": 0,
+                    "y": 0
+                },
+                "restore": {
+                    "parameters": {
+                        "hook": {
+                            "data": {
+                                "editable": "true"
+                            },
+                            "label": "update-prices-webhook"
+                        }
+                    }
+                },
+                "parameters": [
+                    {
+                        "name": "hook",
+                        "type": "hook:gateway-webhook",
+                        "label": "Webhook",
+                        "required": true
+                    },
+                    {
+                        "name": "maxResults",
+                        "type": "number",
+                        "label": "Maximum number of results"
+                    }
+                ],
+                "interface": [
+                    {
+                        "name": "data",
+                        "spec": {
+                            "spec": [
+                                {
+                                    "name": "product_id",
+                                    "type": "text"
+                                },
+                                {
+                                    "name": "أسم المنتج",
+                                    "type": "text"
+                                },
+                                {
+                                    "name": "سعر المنتج",
+                                    "type": "number"
+                                },
+                                {
+                                    "name": "رمز المنتج sku",
+                                    "type": "text"
+                                },
+                                {
+                                    "name": "الوزن",
+                                    "type": "number"
+                                },
+                                {
+                                    "name": "سعر التكلفة",
+                                    "type": "number"
+                                },
+                                {
+                                    "name": "السعر المخفض",
+                                    "type": "number"
+                                },
+                                {
+                                    "name": "الوصف",
+                                    "type": "text"
+                                },
+                                {
+                                    "name": "صورة المنتج",
+                                    "type": "text"
+                                },
+                                {
+                                    "name": "metadata_title",
+                                    "type": "text"
+                                },
+                                {
+                                    "name": "metadata_description",
+                                    "type": "text"
+                                },
+                                {
+                                    "name": "category_name",
+                                    "type": "text"
+                                },
+                                {
+                                    "name": "brand_name",
+                                    "type": "text"
+                                }
+                            ],
+                            "type": "collection"
+                        },
+                        "type": "array"
+                    }
+                ]
+            }
+        },
+        {
+            "id": 2,
+            "module": "builtin:BasicFeeder",
+            "version": 1,
+            "parameters": {},
+            "mapper": {
+                "array": "{{1.data}}"
+            },
+            "metadata": {
+                "designer": {
+                    "x": 300,
+                    "y": 0
+                },
+                "restore": {}
+            }
+        },
+        {
+            "id": 3,
+            "module": "salla:CreateProduct",
+            "version": 1,
+            "parameters": {
+                "__IMTCONN__": 13703041
+            },
+            "mapper": {
+                "name": "{{2.`أسم المنتج`}}",
+                "price": "{{2.`سعر المنتج`}}",
+                "product_type": "product",
+                "quantity": "100",
+                "description": "{{2.`الوصف`}}",
+                "require_shipping": true,
+                "maximum_quantity_per_order": "1",
+                "weight": "{{2.`الوزن`}}",
+                "sku": "{{2.`رمز المنتج sku`}}",
+                "metadata_title": "{{2.metadata_title}}",
+                "metadata_description": "{{2.metadata_description}}"
+            },
+            "metadata": {
+                "designer": {
+                    "x": 600,
+                    "y": 0
+                },
+                "restore": {
+                    "expect": {
+                        "pinned": {
+                            "mode": "edit"
+                        },
+                        "status": {
+                            "mode": "chose"
+                        },
+                        "enable_note": {
+                            "mode": "chose"
+                        },
+                        "product_type": {
+                            "mode": "chose",
+                            "label": "منتج"
+                        },
+                        "hide_quantity": {
+                            "mode": "chose"
+                        },
+                        "require_shipping": {
+                            "mode": "chose"
+                        },
+                        "enable_upload_image": {
+                            "mode": "chose"
+                        }
+                    },
+                    "parameters": {
+                        "__IMTCONN__": {
+                            "data": {
+                                "scoped": "true",
+                                "connection": "salla2"
+                            },
+                            "label": "My Salla OAuth2 Connection connection22"
+                        }
+                    }
+                },
+                "parameters": [
+                    {
+                        "name": "__IMTCONN__",
+                        "type": "account:salla2,salla",
+                        "label": "Connection",
+                        "required": true
+                    }
+                ],
+                "expect": [
+                    {
+                        "name": "name",
+                        "type": "text",
+                        "label": "The name of the product.",
+                        "required": true
+                    },
+                    {
+                        "name": "price",
+                        "type": "uinteger",
+                        "label": "The price of the product.",
+                        "required": true
+                    },
+                    {
+                        "name": "product_type",
+                        "type": "select",
+                        "label": "The type of product.",
+                        "required": true
+                    },
+                    {
+                        "name": "quantity",
+                        "type": "uinteger",
+                        "label": "The amount of the product.",
+                        "required": true
+                    },
+                    {
+                        "name": "description",
+                        "type": "text",
+                        "label": "The description of the product."
+                    },
+                    {
+                        "name": "sale_price",
+                        "type": "uinteger",
+                        "label": "The sale price of the product."
+                    },
+                    {
+                        "name": "cost_price",
+                        "type": "uinteger",
+                        "label": "The cost of the price of the product."
+                    },
+                    {
+                        "name": "require_shipping",
+                        "type": "boolean",
+                        "label": "if the product requires shipping or not."
+                    },
+                    {
+                        "name": "maximum_quantity_per_order",
+                        "type": "uinteger",
+                        "label": "Maximum Quantity Per Order"
+                    },
+                    {
+                        "name": "weight",
+                        "type": "uinteger",
+                        "label": "Applicable to the weight of the product."
+                    },
+                    {
+                        "name": "sku",
+                        "type": "text",
+                        "label": "The SKU of the product."
+                    },
+                    {
+                        "name": "hide_quantity",
+                        "type": "boolean",
+                        "label": "Whether to hide the quantity or not."
+                    },
+                    {
+                        "name": "enable_upload_image",
+                        "type": "boolean",
+                        "label": "Enable upload image for the product."
+                    },
+                    {
+                        "name": "enable_note",
+                        "type": "boolean",
+                        "label": "Allow to customer write notes"
+                    },
+                    {
+                        "name": "pinned",
+                        "type": "boolean",
+                        "label": "if you want to pin the product."
+                    },
+                    {
+                        "name": "subtitle",
+                        "type": "text",
+                        "label": "The subtitle of the product."
+                    },
+                    {
+                        "name": "promotion_title",
+                        "type": "text",
+                        "label": "The promotion title "
+                    },
+                    {
+                        "name": "metadata_title",
+                        "type": "text",
+                        "label": "The Seo title for product page."
+                    },
+                    {
+                        "name": "metadata_description",
+                        "type": "text",
+                        "label": "The Seo description for product page."
+                    },
+                    {
+                        "name": "categories",
+                        "type": "select",
+                        "label": "Select Categories",
+                        "multiple": true
+                    },
+                    {
+                        "name": "brand_id",
+                        "type": "select",
+                        "label": "Select Brand"
+                    },
+                    {
+                        "name": "status",
+                        "type": "select",
+                        "label": "The status of the product."
+                    }
+                ]
+            }
+        },
+        {
+            "id": 4,
+            "module": "http:ActionSendData",
+            "version": 3,
+            "parameters": {
+                "handleErrors": false,
+                "useNewZLibDeCompress": true
+            },
+            "mapper": {
+                "ca": "",
+                "qs": [],
+                "url": "https://api.salla.dev/admin/v2/products/{{3.id}}/images",
+                "data": "{\"url\": \"{{2.`صورة المنتج`}}\"}",
+                "gzip": true,
+                "method": "POST",
+                "headers": [
+                    {
+                        "name": "Authorization",
+                        "value": "Bearer {{connection.accessToken}}"
+                    },
+                    {
+                        "name": "Content-Type",
+                        "value": "application/json"
+                    }
+                ],
+                "timeout": "",
+                "useMtls": false,
+                "authPass": "",
+                "authUser": "",
+                "bodyType": "raw",
+                "contentType": "application/json",
+                "serializeUrl": false,
+                "shareCookies": false,
+                "parseResponse": true,
+                "followRedirect": true,
+                "useQuerystring": false,
+                "followAllRedirects": false,
+                "rejectUnauthorized": true
+            },
+            "metadata": {
+                "designer": {
+                    "x": 900,
+                    "y": 0
+                },
+                "restore": {
+                    "expect": {
+                        "method": {
+                            "mode": "chose",
+                            "label": "POST"
+                        },
+                        "bodyType": {
+                            "mode": "chose",
+                            "label": "Raw"
+                        },
+                        "contentType": {
+                            "mode": "chose",
+                            "label": "JSON (application/json)"
+                        }
+                    },
+                    "parameters": {
+                        "handleErrors": false,
+                        "useNewZLibDeCompress": true
+                    }
+                },
+                "parameters": [
+                    {
+                        "name": "handleErrors",
+                        "type": "boolean",
+                        "label": "Evaluate all states as errors (except for 2xx and 3xx)"
+                    },
+                    {
+                        "name": "useNewZLibDeCompress",
+                        "type": "hidden"
+                    }
+                ],
+                "expect": [
+                    {
+                        "name": "url",
+                        "type": "url",
+                        "label": "URL",
+                        "required": true
+                    },
+                    {
+                        "name": "serializeUrl",
+                        "type": "boolean",
+                        "label": "Serialize URL"
+                    },
+                    {
+                        "name": "method",
+                        "type": "select",
+                        "label": "Method",
+                        "required": true,
+                        "validate": {
+                            "enum": [
+                                "GET",
+                                "HEAD",
+                                "POST",
+                                "PUT",
+                                "PATCH",
+                                "DELETE",
+                                "OPTIONS"
+                            ]
+                        }
+                    },
+                    {
+                        "name": "headers",
+                        "spec": [
+                            {
+                                "name": "name",
+                                "type": "text",
+                                "label": "Name"
+                            },
+                            {
+                                "name": "value",
+                                "type": "text",
+                                "label": "Value"
+                            }
+                        ],
+                        "type": "array",
+                        "label": "Headers"
+                    },
+                    {
+                        "name": "bodyType",
+                        "type": "select",
+                        "label": "Body type"
+                    },
+                    {
+                        "name": "parseResponse",
+                        "type": "boolean",
+                        "label": "Parse response"
+                    },
+                    {
+                        "name": "contentType",
+                        "type": "select",
+                        "label": "Content type"
+                    },
+                    {
+                        "name": "data",
+                        "type": "text",
+                        "label": "Request content"
+                    }
+                ]
+            }
+        }
+    ],
+    "metadata": {
+        "instant": true,
+        "version": 1,
+        "scenario": {
+            "roundtrips": 1,
+            "maxErrors": 3,
+            "autoCommit": true,
+            "sequential": false,
+            "slots": null,
+            "confidential": false,
+            "dataloss": false,
+            "dlq": false
+        },
+        "designer": {
+            "orphans": []
+        },
+        "zone": "eu2.make.com",
+        "notes": []
+    }
+}
