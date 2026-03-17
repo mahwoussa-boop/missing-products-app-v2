@@ -1,10 +1,11 @@
 """
-sovereign_matcher.py v12.0 — محرك المطابقة السيادي (صارم جداً وذكي)
+sovereign_matcher.py v13.0 — محرك المطابقة السيادي (الصارم والدقيق 100%)
 ══════════════════════════════════════════════════════════════════════
-- عزل التسترات: لا يتم مقارنة التستر إلا بالتستر.
-- عزل الأحجام والتركيز: عقوبات صارمة جداً (تصل إلى تصفير النسبة) عند اختلاف الحجم أو النوع.
-- إزالة العينات: تجاهل تام لأي منتج حجمه أقل من 10 مل أو سعره أقل من 15 ريال.
-- تحسين خوارزمية المطابقة: معاقبة شديدة لاختلاف الكلمات الأساسية لمنع مطابقة عطور مختلفة لنفس الماركة.
+- تجريد الأسماء: إزالة الكلمات الشائعة (عطر، تستر، مل، EDP) ومقارنة "جوهر الاسم" فقط لمنع خلط العطور.
+- عزل التسترات: التستر يقارن بالتستر فقط، وإلا النسبة صفر.
+- عزل الأحجام: 50مل لا يقارن بـ 100مل إطلاقاً.
+- فلترة العينات: تجاهل تام للمنتجات < 10مل والأسعار < 15 ريال.
+- حل نهائي لمشكلة (باتشولي vs وومن) و (ديسيجن vs إنترلود).
 """
 
 import pandas as pd
@@ -12,101 +13,107 @@ import re
 import json
 import asyncio
 import threading
-from rapidfuzz import fuzz, process
+from rapidfuzz import fuzz
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from typing import Dict, Tuple, Optional, List, Any
+from typing import Dict, Tuple, Optional, Any
 import streamlit as st
 import google.generativeai as genai
 from config import GEMINI_API_KEY
 
-def normalize_product_name(text: str) -> str:
-    """تنظيف وتوحيد اسم المنتج بصرامة عالية."""
+def get_core_name(text: str) -> str:
+    """استخراج 'جوهر العطر' فقط للمقارنة الصارمة (إزالة الكلمات المضللة)"""
     if not isinstance(text, str) or pd.isna(text):
         return ""
     
     text = text.lower()
     text = re.sub(r'[^\w\s]', ' ', text)
     
-    # توحيد الأرقام والكلمات الملتصقة (مثل 100ml إلى 100 ml)
-    text = re.sub(r'(\d+)\s*(ml|مل|ملل|g|غرام|oz)', r'\1 \2', text)
-    
-    # الكلمات التسويقية والوصفية التي تسبب تشويشاً يجب إزالتها لكي نركز على اسم العطر الفعلي
+    # قائمة الكلمات التي ترفع نسبة التشابه بشكل وهمي ويجب إزالتها من عملية الـ Fuzzy
     stop_words = [
-        r'\btester\b', r'\bتستر\b', r'\bedp\b', r'\bedt\b', r'\bedc\b',
-        r'\beau de parfum\b', r'\beau de toilette\b', r'\bparfum\b', r'\bcologne\b',
-        r'\bml\b', r'\bمل\b', r'\bللجنسين\b', r'\bللرجال\b', r'\بللنساء\b', 
-        r'\bmen\b', r'\bwomen\b', r'\bunisex\b', r'\bعطر\b', r'\bعينة\b',
+        r'\btester\b', r'\bتستر\b', r'\bedp\b', r'\bedt\b', r'\bedc\b', r'\bparfum\b',
+        r'\beau de parfum\b', r'\beau de toilette\b', r'\bاو دو بارفيوم\b', r'\bاو دو تواليت\b',
+        r'\bاو دو برفيوم\b', r'\bاودي بارفيوم\b', r'\bاكستريت\b', r'\bextrait\b', r'\bكولون\b',
+        r'\bml\b', r'\bمل\b', r'\bملل\b', r'\bg\b', r'\bغرام\b', r'\boz\b',
+        r'\bللجنسين\b', r'\bللرجال\b', r'\بللنساء\b', r'\bmen\b', r'\bwomen\b', r'\bunisex\b', 
+        r'\bعطر\b', r'\bعينة\b', r'\bمعطر\b', r'\bمزيل عرق\b', r'\bلوشن\b', r'\bجهاز\b', r'\bفواحة\b',
         r'\bبدون كرتون\b', r'\bبدون غطاء\b', r'\bاصدار محدود\b', r'\bحصري\b',
-        r'\bطقم\b', r'\bمجموعة\b', r'\bset\b', r'\bgift\b', r'\bهدايا\b'
+        r'\bطقم\b', r'\bمجموعة\b', r'\bset\b', r'\bgift\b', r'\bهدايا\b', r'\bمكياج\b',
+        r'\d+' # إزالة الأرقام لأننا استخرجناها كسمات (Attributes)
     ]
+    
     for word in stop_words:
         text = re.sub(word, ' ', text)
     
     return " ".join(text.split())
 
 def extract_attributes(name: str) -> Dict[str, Any]:
-    """استخراج السمات الأساسية بذكاء عالي لمنع خلط المنتجات المختلفة."""
+    """استخراج السمات الدقيقة للعطر لفرض القواعد الصارمة"""
     attrs = {
         "size_num": None, 
         "concentration": "unknown", 
         "is_tester": False, 
         "is_sample": False,
-        "is_set": False
+        "is_set": False,
+        "product_type": "perfume"
     }
     if not isinstance(name, str) or pd.isna(name): return attrs
     
     name_lower = name.lower()
     
-    # 1. كشف التستر بصرامة (في بداية أو نهاية الاسم أو وصف)
+    # 1. كشف التستر (أي دلالة على أنه تستر)
     if any(k in name_lower for k in ["تستر", "tester", "بدون غطاء", "بدون كرتون", "(تستر)"]):
         attrs["is_tester"] = True
         
-    # 2. كشف الطقم/المجموعة
-    if any(k in name_lower for k in ["طقم", "مجموعة", "set", "gift", "هدايا"]):
+    # 2. كشف الطقم
+    if any(k in name_lower for k in ["طقم", "مجموعة", "set", "gift"]):
         attrs["is_set"] = True
 
-    # 3. كشف الحجم والعينات
+    # 3. كشف الحجم (لتحديد العينات والمطابقة الدقيقة)
     size_match = re.search(r'(\d+)\s*(ml|مل|ملل|g|غرام|جرام)', name_lower)
     if size_match:
         try:
             num = float(size_match.group(1))
             attrs["size_num"] = num
-            # تصنيف كعينة إذا كان أقل من 10 مل
             if num < 10:
                 attrs["is_sample"] = True
         except ValueError: 
             pass
         
-    # 4. كشف التركيز والنوع بشكل دقيق
-    if any(k in name_lower for k in ["edp", "parfum", "بارفيوم", "بيرفيوم", "برفيوم", "إكستريت", "extrait"]):
-        attrs["concentration"] = "edp"
-    elif any(k in name_lower for k in ["edt", "toilette", "تواليت"]):
-        attrs["concentration"] = "edt"
-    elif any(k in name_lower for k in ["edc", "cologne", "كولونيا", "كولون"]):
-        attrs["concentration"] = "edc"
+    # 4. كشف نوع المنتج والتركيز
+    if any(k in name_lower for k in ["جهاز", "الة", "آلة", "موزع", "فواحة", "ترطيب"]):
+         attrs["product_type"] = "device"
     elif any(k in name_lower for k in ["hair mist", "عطر شعر", "للشعر", "معطر شعر"]):
-         attrs["concentration"] = "hair_mist"
-    elif any(k in name_lower for k in ["spray", "سبراي", "مزيل عرق", "deodorant", "ديودرنت", "رول اون"]):
-         attrs["concentration"] = "deodorant"
+         attrs["product_type"] = "hair_mist"
+    elif any(k in name_lower for k in ["spray", "سبراي", "مزيل عرق", "deodorant", "رول اون"]):
+         attrs["product_type"] = "deodorant"
     elif any(k in name_lower for k in ["lotion", "لوشن", "مرطب", "كريم", "cream"]):
-         attrs["concentration"] = "lotion"
-    elif any(k in name_lower for k in ["جهاز", "الة", "آلة", "موزع", "فواحة"]):
-         attrs["concentration"] = "device"
-        
+         attrs["product_type"] = "lotion"
+    elif any(k in name_lower for k in ["احمر خدود", "بلاشر", "مكياج", "روج", "ماسكارا", "هايلايتر"]):
+         attrs["product_type"] = "makeup"
+    
+    # تحديد التركيز للعطور فقط
+    if attrs["product_type"] == "perfume":
+        if any(k in name_lower for k in ["edp", "parfum", "بارفيوم", "بيرفيوم", "برفيوم", "إكستريت", "extrait"]):
+            attrs["concentration"] = "edp"
+        elif any(k in name_lower for k in ["edt", "toilette", "تواليت"]):
+            attrs["concentration"] = "edt"
+        elif any(k in name_lower for k in ["edc", "cologne", "كولونيا", "كولون"]):
+            attrs["concentration"] = "edc"
+
     return attrs
 
 class SovereignMatcher:
     def __init__(self, mahwous_df: pd.DataFrame):
         self.mahwous_df = mahwous_df.copy()
         if not self.mahwous_df.empty:
-            if 'normalized_name' not in self.mahwous_df.columns:
-                self.mahwous_df['normalized_name'] = self.mahwous_df['product_name'].astype(str).apply(normalize_product_name)
-            
-            # استخراج سمات منتجاتنا مسبقاً لتسريع المقارنة
+            # استخراج الأسماء المجردة (Core Names) للمقارنة الدقيقة
+            self.mahwous_df['core_name'] = self.mahwous_df['product_name'].astype(str).apply(get_core_name)
             self.mahwous_df['attrs'] = self.mahwous_df['product_name'].astype(str).apply(extract_attributes)
             
-            self.mahwous_names = self.mahwous_df['normalized_name'].tolist()
+            self.mahwous_names = self.mahwous_df['core_name'].tolist()
+            
+            # TF-IDF للبحث المبدئي
             self.vectorizer = TfidfVectorizer(analyzer='char_wb', ngram_range=(3, 5))
             self.tfidf_matrix = self.vectorizer.fit_transform(self.mahwous_names)
         else:
@@ -116,51 +123,51 @@ class SovereignMatcher:
         if not self.mahwous_names:
             return None, 0.0
             
-        norm_name = normalize_product_name(competitor_name)
+        core_comp_name = get_core_name(competitor_name)
         
-        # إذا كان الاسم المنظف فارغاً (مثلاً كان مجرد أرقام وحجم)، لا تبحث
-        if not norm_name.strip():
+        if not core_comp_name.strip():
             return None, 0.0
 
-        query_vec = self.vectorizer.transform([norm_name])
+        query_vec = self.vectorizer.transform([core_comp_name])
         cosine_sim = cosine_similarity(query_vec, self.tfidf_matrix).flatten()
         
-        # جلب أفضل المرشحين بناءً على TF-IDF
-        top_indices = cosine_sim.argsort()[-20:][::-1]
+        top_indices = cosine_sim.argsort()[-30:][::-1]
         
         best_final_score = 0
         best_match_idx = -1
         
         for idx in top_indices:
-            mahwous_name = self.mahwous_names[idx]
+            mahwous_core = self.mahwous_names[idx]
             mahwous_row = self.mahwous_df.iloc[idx]
             mahwous_attrs = mahwous_row['attrs']
             
-            # حساب نسبة التشابه الأساسية (Fuzzy)
-            # نستخدم token_sort_ratio ليعاقب اختلاف ترتيب الكلمات والكلمات المفقودة/الزائدة
-            score_sort = fuzz.token_sort_ratio(norm_name, mahwous_name)
-            score_set = fuzz.token_set_ratio(norm_name, mahwous_name)
-            fuzz_score = (score_sort * 0.8) + (score_set * 0.2)
+            # المقارنة فقط على (جوهر الاسم)
+            # مثال: "ديسيجن" vs "انترلود" ستعطي نسبة ضعيفة جداً
+            fuzz_score = fuzz.token_sort_ratio(core_comp_name, mahwous_core)
             
-            # ---------- القواعد السيادية الصارمة ---------- #
+            # ---------- القواعد الحاكمة (تصفر النسبة إذا اختلفت) ---------- #
             
-            # 1. قاعدة التستر: التستر يطابق تستر فقط.
-            if comp_attrs["is_tester"] != mahwous_attrs["is_tester"]:
-                fuzz_score *= 0.1  # تدمير النسبة
+            # 1. نوع المنتج (جهاز لا يساوي عطر، مكياج لا يساوي عطر)
+            if comp_attrs["product_type"] != mahwous_attrs["product_type"]:
+                fuzz_score = 0
                 
-            # 2. قاعدة الأطقم: الطقم يطابق طقماً
-            if comp_attrs["is_set"] != mahwous_attrs["is_set"]:
-                fuzz_score *= 0.3
+            # 2. التستر (تستر يطابق تستر فقط)
+            elif comp_attrs["is_tester"] != mahwous_attrs["is_tester"]:
+                fuzz_score = 0
                 
-            # 3. قاعدة الحجم
-            if comp_attrs["size_num"] is not None and mahwous_attrs["size_num"] is not None:
+            # 3. الأطقم (مجموعة تطابق مجموعة فقط)
+            elif comp_attrs["is_set"] != mahwous_attrs["is_set"]:
+                fuzz_score = 0
+                
+            # 4. الحجم (يجب أن يتطابق إذا كان معلوماً)
+            elif comp_attrs["size_num"] is not None and mahwous_attrs["size_num"] is not None:
                 if comp_attrs["size_num"] != mahwous_attrs["size_num"]:
-                    fuzz_score *= 0.1  # تدمير النسبة (50مل ليس 100مل)
+                    fuzz_score = 0
             
-            # 4. قاعدة التركيز والنوع (عطر، لوشن، جهاز، إلخ)
-            if comp_attrs["concentration"] != "unknown" and mahwous_attrs["concentration"] != "unknown":
+            # 5. التركيز (EDP لا يطابق EDT)
+            elif comp_attrs["concentration"] != "unknown" and mahwous_attrs["concentration"] != "unknown":
                 if comp_attrs["concentration"] != mahwous_attrs["concentration"]:
-                    fuzz_score *= 0.2  # تدمير النسبة
+                    fuzz_score = 0
 
             # ------------------------------------------------ #
 
@@ -173,11 +180,11 @@ class SovereignMatcher:
         return None, 0.0
 
 def process_item_pipeline(row: Dict, matcher: SovereignMatcher) -> Optional[Dict]:
-    """معالجة منتج واحد من المنافس وتصنيفه."""
+    """معالجة وتصنيف كل منتج يمر عبر الأنابيب"""
     product_name = str(row.get('product_name', ''))
     if not product_name or product_name == 'nan': return None
     
-    # 1. فلتر السعر (تجاهل أقل من 15 ريال)
+    # 1. فلتر السعر (تجاهل ما هو أقل من 15 ريال)
     try:
         price_val = float(str(row.get('price', '0')).replace(',', ''))
         if price_val < 15.0: return None
@@ -186,18 +193,19 @@ def process_item_pipeline(row: Dict, matcher: SovereignMatcher) -> Optional[Dict
         
     comp_attrs = extract_attributes(product_name)
     
-    # 2. فلتر العينات (تجاهل أقل من 10 مل)
+    # 2. فلتر العينات (تجاهل الأقل من 10 مل)
     if comp_attrs["is_sample"]: return None
         
     match_row, score = matcher.get_best_match(product_name, comp_attrs)
     
-    # عتبات التصنيف الدقيقة جداً:
-    # > 85 : متطابق
-    # 50 - 85 : مراجعة
-    # < 50 : مفقود أكيد
-    if score >= 85:
+    # التصنيف: 
+    # المطابقة أصبحت أصعب لأننا نقارن "الجوهر" فقط (بدون مل وعطر وغيرها)
+    # > 80% = متطابق
+    # 45% إلى 80% = مراجعة
+    # < 45% = مفقود أكيد
+    if score >= 80:
         status = "red"
-    elif score >= 50:
+    elif score >= 45:
         status = "yellow"
     else:
         status = "green"
@@ -232,9 +240,9 @@ def background_analysis_task(mahwous_df: pd.DataFrame, competitor_files_data: Di
 
         raw_competitor_df = pd.concat(all_comp_list, ignore_index=True)
         
-        # تجميع المنتجات المكررة بين المنافسين
-        raw_competitor_df['norm_name'] = raw_competitor_df['product_name'].astype(str).apply(normalize_product_name)
-        grouped_competitor_df = raw_competitor_df.groupby('norm_name', as_index=False).agg({
+        # تجميع المنتجات المكررة بين المنافسين باستخدام "الجوهر" أيضاً لمنع التكرار البصري
+        raw_competitor_df['core_name'] = raw_competitor_df['product_name'].astype(str).apply(get_core_name)
+        grouped_competitor_df = raw_competitor_df.groupby('core_name', as_index=False).agg({
             'product_name': 'first',
             'price': 'min',
             'image_url': 'first',
