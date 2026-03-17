@@ -1,7 +1,10 @@
 """
 sovereign_matcher.py — محرك المطابقة السيادي لمتجر مهووس
 ═══════════════════════════════════════════════════════════════
-v9.0 — دعم التجميع الذكي وتصحيح نسب المطابقة 
+v10.0 — دعم التجميع الذكي (Smart Grouping) وتصحيح نسب المطابقة 
+- تجميع المنافسين في بطاقة واحدة إذا تكرر المنتج.
+- تقسيم دقيق (مفقود أكيد، مراجعة، متطابق).
+- دعم المعالجة في الخلفية لمنع تجميد شريط التقدم.
 """
 
 import re
@@ -19,6 +22,7 @@ from streamlit.runtime.scriptrunner import add_script_run_ctx
 
 from config import GEMINI_API_KEY, SYNONYMS
 
+# إعداد Gemini
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
@@ -26,6 +30,7 @@ class SovereignMatcher:
     def __init__(self, mahwous_df: pd.DataFrame):
         self.mahwous_df = mahwous_df
         
+        # حماية ضد الملفات الفارغة
         if self.mahwous_df.empty:
             self.mah_processed = pd.DataFrame(columns=['product_name', 'clean_name', 'category', 'brand', 'size'])
             self.vectorizer = TfidfVectorizer(ngram_range=(1, 3), analyzer='char_wb')
@@ -35,6 +40,7 @@ class SovereignMatcher:
         self.mah_processed = self._preprocess_df(mahwous_df)
         self.vectorizer = TfidfVectorizer(ngram_range=(1, 3), analyzer='char_wb')
         
+        # حماية المحرك من الانهيار (ValueError)
         try:
             self.tfidf_matrix = self.vectorizer.fit_transform(self.mah_processed['clean_name'])
         except ValueError:
@@ -42,6 +48,7 @@ class SovereignMatcher:
             self.tfidf_matrix = self.vectorizer.fit_transform(self.mah_processed['clean_name'])
 
     def _preprocess_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        """تنظيف ومعالجة مسبقة لبيانات المتجر."""
         processed = df.copy()
         if 'product_name' not in processed.columns:
             processed['product_name'] = 'منتج_بدون_اسم'
@@ -90,6 +97,7 @@ class SovereignMatcher:
         return match.group(0) if match else "unknown"
 
     def find_best_match(self, comp_name: str) -> Dict[str, Any]:
+        """البحث وتحديد نسبة التطابق بدقة."""
         if self.mahwous_df.empty:
             return {"status": "مفقود أكيد", "confidence_level": "green", "match_name": "", "match_image": "", "match_price": 0, "match_score": 0}
 
@@ -123,9 +131,9 @@ class SovereignMatcher:
                 best_idx = idx
 
         # ─── تحديد الأقسام بدقة بناءً على طلبك ───
-        # من 0 إلى 45 -> مفقود أكيد (القسم الأخضر)
-        # من 46 إلى 85 -> يحتاج مراجعة (القسم الأصفر)
-        # من 86 إلى 100 -> متطابق متوفر لدينا (القسم الأحمر)
+        # التطابق 0% إلى 45% -> مفقود أكيد (القسم الأخضر)
+        # التطابق 46% إلى 85% -> مشتبه به ويحتاج مراجعة (القسم الأصفر)
+        # التطابق 86% إلى 100% -> متطابق ومتوفر لدينا (القسم الأحمر)
         
         status = "مفقود أكيد"
         confidence = "green"
@@ -140,10 +148,10 @@ class SovereignMatcher:
                 "match_score": round(best_score, 1)
             }
             
-            if best_score > 85:
+            if best_score >= 85:
                 status = "متطابق (متوفر)"
                 confidence = "red"
-            elif best_score > 45:
+            elif best_score >= 45:
                 status = "مشتبه به (مراجعة)"
                 confidence = "yellow"
 
@@ -154,6 +162,7 @@ class SovereignMatcher:
         }
 
 async def ai_verify_match(comp_name: str, match_name: str) -> Dict:
+    """التحقق الذكي عبر الذكاء الاصطناعي للمنتجات المشتبه بها"""
     if not GEMINI_API_KEY: return {"is_match": False, "reason": "No API Key"}
     prompt = f"""قارن بين هذين المنتجين بدقة: المنتج 1: {comp_name} | المنتج 2: {match_name}
     أجب بصيغة JSON: {{"is_match": true/false, "reason": "شرح موجز بالعربية"}}"""
@@ -161,18 +170,19 @@ async def ai_verify_match(comp_name: str, match_name: str) -> Dict:
         model = genai.GenerativeModel('gemini-2.0-flash')
         response = await asyncio.to_thread(model.generate_content, prompt)
         return json.loads(re.sub(r'```json\s*|\s*```', '', response.text).strip())
-    except: return {"is_match": False, "reason": "AI Error"}
+    except: return {"is_match": False, "reason": "خطأ في استجابة الذكاء الاصطناعي"}
 
 def _run_analysis_thread(mahwous_df, competitor_data, matcher):
+    """دالة تعمل في الخلفية لمعالجة المنتجات وتجميعها دون تجميد الواجهة"""
     raw_results = []
     
-    # 1. جمع كل البيانات أولاً
+    # 1. جمع كل البيانات من كل ملفات المنافسين
     for comp_file, df in competitor_data.items():
         if df.empty: continue
         for _, row in df.iterrows():
             if not st.session_state.analysis_running: break
             prod_name = str(row.get('product_name', 'منتج_غير_معروف')).strip()
-            if not prod_name: continue
+            if not prod_name or prod_name == 'nan': continue
             
             match_res = matcher.find_best_match(prod_name)
             raw_results.append({
@@ -182,18 +192,21 @@ def _run_analysis_thread(mahwous_df, competitor_data, matcher):
                 "competitor_name": comp_file.replace('.csv', ''),
                 **match_res
             })
+            
             st.session_state.processed_count += 1
-            if st.session_state.processed_count % 10 == 0:
+            # تحديث الواجهة اللحظية كل 15 منتج
+            if st.session_state.processed_count % 15 == 0:
                 st.session_state.analysis_results = raw_results
                 
     if not st.session_state.analysis_running: return
 
     # 2. التجميع الذكي للمنافسين (Smart Grouping)
+    # إذا توفر المنتج عند أكثر من منافس، سيتم جمعه في بطاقة واحدة
     if raw_results:
         df_res = pd.DataFrame(raw_results)
         grouped = df_res.groupby('product_name', as_index=False).agg({
             'price': lambda x: f"{min(x)} - {max(x)}" if min(x) != max(x) else str(min(x)),
-            'competitor_name': lambda x: " ، ".join(set(x)),
+            'competitor_name': lambda x: " ، ".join(set(x)), # دمج أسماء المنافسين
             'image_url': 'first',
             'match_name': 'first',
             'match_image': 'first',
@@ -210,6 +223,7 @@ def _run_analysis_thread(mahwous_df, competitor_data, matcher):
     st.session_state.needs_rerun = True
 
 def start_sovereign_analysis(mahwous_df, competitor_data):
+    """تهيئة المحرك وتشغيل الفحص في خيط منفصل (Thread)"""
     try: matcher = SovereignMatcher(mahwous_df)
     except Exception as e:
         st.error(f"حدث خطأ غير متوقع أثناء تهيئة المحرك: {e}")
