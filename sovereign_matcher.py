@@ -1,11 +1,12 @@
 """
 sovereign_matcher.py — محرك المطابقة السيادي لمتجر مهووس
 ═══════════════════════════════════════════════════════════════
-v7.0 — الإصلاح الشامل للدقة والذكاء
+v7.0 — الإصلاح الشامل للدقة والذكاء (معدل لمعالجة النصوص الفارغة)
 - استخدام تقنيات (Advanced NLP) لاستخراج الماركة، الحجم، والتركيز.
 - فلترة الفئات الصارمة (عطور، مكياج، لوشن).
 - دمج الذكاء الاصطناعي (Gemini 2.0 Flash) لاتخاذ القرارات النهائية.
 - تحسين الأداء عبر الذاكرة المؤقتة (Caching).
+- حماية المحرك من الانهيار (ValueError: empty vocabulary).
 """
 
 import re
@@ -32,12 +33,24 @@ class SovereignMatcher:
         self.mahwous_df = mahwous_df
         self.mah_processed = self._preprocess_df(mahwous_df)
         self.vectorizer = TfidfVectorizer(ngram_range=(1, 3), analyzer='char_wb')
-        self.tfidf_matrix = self.vectorizer.fit_transform(self.mah_processed['clean_name'])
+        
+        # حماية المحرك من الانهيار في حال كانت كل الكلمات Stop Words وأصبح النص فارغاً
+        try:
+            self.tfidf_matrix = self.vectorizer.fit_transform(self.mah_processed['clean_name'])
+        except ValueError:
+            # إذا فشل المحرك، نقوم بوضع قيمة افتراضية للعمل بأمان
+            self.mah_processed['clean_name'] = 'منتج_غير_معروف'
+            self.tfidf_matrix = self.vectorizer.fit_transform(self.mah_processed['clean_name'])
 
     def _preprocess_df(self, df: pd.DataFrame) -> pd.DataFrame:
         """تحليل ومعالجة مسبقة لبيانات المتجر لاستخراج الخصائص الحرجة."""
         processed = df.copy()
         processed['clean_name'] = processed['product_name'].apply(self.normalize_text)
+        
+        # --- الإصلاح الجذري لمعالجة النصوص الفارغة ---
+        # استبدال أي نص فارغ تماماً بكلمة آمنة حتى يتعرف عليها المحرك ولا ينهار
+        processed['clean_name'] = processed['clean_name'].replace(r'^\s*$', 'منتج_بدون_اسم', regex=True).fillna('منتج_بدون_اسم')
+        
         processed['category'] = processed['clean_name'].apply(self.detect_category)
         processed['brand'] = processed['product_name'].apply(self.extract_brand)
         processed['size'] = processed['product_name'].apply(self.extract_size)
@@ -92,6 +105,10 @@ class SovereignMatcher:
         potential_indices = self.mah_processed[self.mah_processed['category'] == cat_comp].index
         if len(potential_indices) == 0:
             potential_indices = self.mah_processed.index # Fallback if category detection fails
+
+        # حماية إضافية لضمان أن النص المدخل غير فارغ لمحرك البحث
+        if not clean_comp.strip():
+            clean_comp = 'منتج_بدون_اسم'
 
         # 2. حساب TF-IDF Similarity
         comp_vec = self.vectorizer.transform([clean_comp])
