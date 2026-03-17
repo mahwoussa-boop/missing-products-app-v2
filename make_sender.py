@@ -278,38 +278,38 @@ def prepare_final_payload(p: Dict[str, Any]) -> Dict[str, Any]:
     # التصنيف الذكي (1-3 تصنيفات حسب نوع المنتج)
     categories = _smart_categorize(name, brand_raw)
 
-    # بناء الهيكلة الصارمة (المفاتيح العربية ثابتة لا تتغير)
+    # بناء الهيكلة بأسماء إنجليزية فقط لضمان التوافق مع Blueprint في Make
     item = {
-        "أسم المنتج": name,
-        "سعر المنتج": price,
-        "الوزن": 1,
-        "سعر التكلفة": 0,
-        "السعر المخفض": 0,
-        "الماركة": brand,
-        "اسم الماركة": brand_raw,
-        "التصنيف": categories[0] if categories else 'العطور',
-        "التصنيفات": categories,
-        "الوصف": str(p.get("description", "")).strip(),
-        "صورة المنتج": "",
-        "صور إضافية": [],
-        "عنوان الصفحة": seo["عنوان الصفحة"],
-        "رابط الصفحة SEO": seo["رابط الصفحة SEO"],
-        "وصف الصفحة": seo["وصف الصفحة"],
-        # حقول إنجليزية للتوافق مع Iterator في Make → Salla module
+        # حقول إنجليزية أساسية (تتوافق مع Blueprint النهائي)
+        "product_name": name,
+        "product_price": price,
+        "product_weight": 1,
+        "cost_price": 0,
+        "sale_price": 0,
+        "brand_name": brand if brand else brand_raw,  # إرسال الاسم الخام إذا لم يكن في قائمة مهووس
         "category_name": categories[0] if categories else 'العطور',
-        "brand_name": brand,
+        "product_description": str(p.get("description", "")).strip(),
+        "product_image": "",
+        "product_sku": str(p.get("sku", "")).strip(),
+        "product_id": str(p.get("product_id", "")).strip(),
         "metadata_title": seo["عنوان الصفحة"],
         "metadata_description": seo["وصف الصفحة"],
+        # حقول عربية إضافية للمرجعية (لا تؤثر على Make)
+        "أسم المنتج": name,
+        "سعر المنتج": price,
+        "الوصف": str(p.get("description", "")).strip(),
     }
     
     # 1. التحقق من الوصف (إذا كان فارغاً، يتم إنشاؤه برمجياً فوراً)
-    if not item["الوصف"]:
+    if not item["product_description"]:
         # حقن الروابط الثابتة لمهووس برمجياً في حال عدم توفر وصف
-        item["الوصف"] = f"""
+        desc = f"""
         <h2>{name}</h2>
         <p>اكتشف الفخامة مع <strong>{name}</strong> من {brand if brand else 'ماركة عالمية'}، متوفر الآن في متجر مهووس بسعر {price} ريال سعودي.</p>
         <p>لمشاهدة المزيد من <a href="https://mahwous.com/tags/perfumes">العطور الفاخرة</a> أو استكشاف <a href="https://mahwous.com/brands">أشهر الماركات</a>، تفضل بزيارة متجرنا.</p>
         """
+        item["product_description"] = desc
+        item["الوصف"] = desc
     
     # 2. التحقق من الصور وإصلاحها برمجياً (Python URL Fix)
     # الأولوية: all_images > image_url > competitor_image (الصورة المباشرة من ملف المنافس)
@@ -325,13 +325,14 @@ def prepare_final_payload(p: Dict[str, Any]) -> Dict[str, Any]:
             cleaned_images.append(_clean_url_for_make(str(img_url)))
     
     if cleaned_images:
+        item["product_image"] = cleaned_images[0]
         item["صورة المنتج"] = cleaned_images[0]
-        if len(cleaned_images) > 1:
-            item["صور إضافية"] = cleaned_images[1:]
     else:
         # صورة بديلة في حال عدم توفر أي صورة
         safe_name = urllib.parse.quote(name)
-        item["صورة المنتج"] = f"https://ui-avatars.com/api/?name={safe_name}&background=random&size=512"
+        fallback_img = f"https://ui-avatars.com/api/?name={safe_name}&background=random&size=512"
+        item["product_image"] = fallback_img
+        item["صورة المنتج"] = fallback_img
 
     return item
 
@@ -345,7 +346,7 @@ def send_products_to_make(products: List[Dict[str, Any]]) -> Dict[str, Any]:
     formatted_products = []
     for p in products:
         item = prepare_final_payload(p)
-        if item["أسم المنتج"] and item["سعر المنتج"] > 0:
+        if item["product_name"] and item["product_price"] > 0:
             formatted_products.append(item)
 
     if not formatted_products:
