@@ -1,182 +1,215 @@
 """
-app.py v7.1 — واجهة المستخدم التفاعلية (Fix Duplicate Keys & UI Alignment)
-═══════════════════════════════════════════════════════════
-- حل مشكلة انهيار التطبيق (StreamlitDuplicateElementKey) عبر مفاتيح فريدة.
-- تحسين عرض الصور والبطاقات ليكون متناسقاً ولا يتمدد بشكل عشوائي.
+ai_matcher.py v5.3 — معالجة أخطاء قوية (Robust Analysis)
+═══════════════════════════════════════════════════════════════
+- معالجة أخطاء شاملة لمنع الانهيارات الصامتة (Silent Crashes)
+- كشف آمن لبيانات المنتجات باستخدام .get()
+- ضمان استمرارية شريط التقدم حتى في حال وجود أخطاء في البيانات
 """
 
-import streamlit as st
-import pandas as pd
-import plotly.express as px
+import re
+import json
 import asyncio
-import time
+import pandas as pd
+import streamlit as st
+import google.generativeai as genai
+from rapidfuzz import fuzz
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from typing import List, Dict, Any, Tuple, Optional
 from datetime import datetime
+import threading
 
-from config import APP_TITLE, APP_VERSION, APP_ICON
-from db_manager import load_mahwous_store_data, load_competitor_data
-from ai_matcher import start_background_analysis, ai_deep_verify_single
-from make_sender import send_products_to_make
+from config import GEMINI_API_KEY
 
-# 1. إعدادات الصفحة
-st.set_page_config(
-    page_title=APP_TITLE,
-    page_icon=APP_ICON,
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+# إعداد Gemini
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
-# 2. تهيئة Session State
-if 'analysis_running' not in st.session_state: st.session_state.analysis_running = False
-if 'processed_count' not in st.session_state: st.session_state.processed_count = 0
-if 'total_count' not in st.session_state: st.session_state.total_count = 0
-if 'analysis_results' not in st.session_state: st.session_state.analysis_results = []
-if 'ignore_list' not in st.session_state: st.session_state.ignore_list = set()
+def normalize_arabic(text: str) -> str:
+    """تنظيف وتوحيد النصوص العربية والإنجليزية لضمان دقة المطابقة."""
+    if not text or pd.isna(text): return ""
+    text = str(text).lower().strip()
+    text = re.sub("[إأآا]", "ا", text)
+    text = re.sub("ة", "ه", text)
+    text = re.sub("ى", "ي", text)
+    text = re.sub(r"[\u064B-\u0652]", "", text)
+    text = re.sub(r"[^\w\s]", " ", text)
+    return " ".join(text.split())
 
-# 3. CSS مخصص
-st.markdown("""
-<style>
-    .stApp { direction: rtl; }
-    [data-testid="stSidebar"] { direction: rtl; }
-    .main-header {
-        background: linear-gradient(90deg, #0f172a 0%, #1e293b 100%);
-        padding: 2rem;
-        border-radius: 1rem;
-        color: white;
-        margin-bottom: 2rem;
-        text-align: center;
-        border-bottom: 4px solid #3b82f6;
-    }
-    .product-card {
-        background: #ffffff;
-        border: 1px solid #e2e8f0;
-        border-radius: 1rem;
-        padding: 1.5rem;
-        margin-bottom: 1.5rem;
-        box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
-    }
-    .badge {
-        padding: 0.4rem 1rem;
-        border-radius: 2rem;
-        font-size: 0.85rem;
-        font-weight: 700;
-        display: inline-block;
-        margin-bottom: 0.5rem;
-    }
-    .badge-green { background: #dcfce7; color: #166534; }
-    .badge-yellow { background: #fef9c3; color: #854d0e; }
-    .badge-red { background: #fee2e2; color: #991b1b; }
-    .stButton > button {
-        border-radius: 0.5rem;
-        font-weight: 600;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-def main():
-    st.markdown(f'<div class="main-header"><h1>{APP_ICON} {APP_TITLE}</h1><p>الإصدار v7.1 | نظام ذكاء الأعمال للمنافسين - معالجة صاروخية</p></div>', unsafe_allow_html=True)
-
-    # الشريط الجانبي
-    with st.sidebar:
-        st.header("📂 مصادر البيانات")
-        mahwous_file = st.file_uploader("ملف متجر مهووس (CSV)", type=["csv"])
-        competitor_files = st.file_uploader("ملفات المنافسين (CSV)", type=["csv"], accept_multiple_files=True)
+async def ai_deep_verify_single(prod_name: str, comp_name: str) -> Dict:
+    """التحقق الدقيق من منتج واحد عبر LLM."""
+    if not GEMINI_API_KEY:
+        return {"is_match": False, "reason": "No API Key"}
         
-        st.divider()
-        if st.button("🚀 بدء التحليل الشامل", type="primary", use_container_width=True, disabled=st.session_state.analysis_running):
-            if mahwous_file and competitor_files:
-                m_df = load_mahwous_store_data(mahwous_file)
-                c_data = {f.name: load_competitor_data(f) for f in competitor_files}
+    prompt = f"""
+    بصفتك خبير عطور، هل هذين المنتجين هما نفس المنتج تماماً؟
+    الفروقات الحرجة (تجعلهما مختلفين):
+    1. الحجم (50ml vs 100ml).
+    2. التركيز (EDP vs EDT vs Parfum).
+    3. النوع (Tester vs Original vs Hair Mist).
+    4. المجموعات (Set) مقابل العلب المنفردة.
+
+    المنتج 1: {prod_name}
+    المنتج 2: {comp_name}
+
+    أجب بصيغة JSON فقط:
+    {{"is_match": true/false, "reason": "سبب موجز بالعربية"}}
+    """
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = await asyncio.to_thread(model.generate_content, prompt)
+        res_text = re.sub(r'```json\s*|\s*```', '', response.text).strip()
+        data = json.loads(res_text)
+        return data
+    except Exception as e:
+        return {"is_match": False, "reason": f"AI Error: {str(e)}"}
+
+def get_hybrid_score(name1: str, name2: str, tfidf_matrix=None, idx1=None, idx2=None) -> float:
+    """حساب درجة التشابه الهجين (Fuzzy + TF-IDF)."""
+    n1 = normalize_arabic(name1)
+    n2 = normalize_arabic(name2)
+    
+    token_sort = fuzz.token_sort_ratio(n1, n2)
+    partial_ratio = fuzz.partial_ratio(n1, n2)
+    fuzzy_score = (token_sort * 0.6) + (partial_ratio * 0.4)
+    
+    if tfidf_matrix is not None and idx1 is not None and idx2 is not None:
+        try:
+            sim = cosine_similarity(tfidf_matrix[idx1], tfidf_matrix[idx2])
+            cosine_score = sim[0][0] * 100
+            return (fuzzy_score * 0.5) + (cosine_score * 0.5)
+        except: pass
+    return fuzzy_score
+
+async def process_item_pipeline(comp_row: Dict, mahwous_df: pd.DataFrame, tfidf_matrix, comp_idx: int, mahwous_len: int) -> Dict:
+    """خط أنابيب معالجة منتج واحد مع معالجة أخطاء آمنة."""
+    try:
+        # استخدام .get() للوصول الآمن للبيانات
+        comp_name = comp_row.get('product_name', '')
+        if not comp_name or str(comp_name).strip() == "":
+            return {**comp_row, "status": "Error (Missing Data)", "confidence_level": "red", "match_name": "بيانات غير مكتملة"}
+
+        best_score = 0
+        best_match_idx = -1
+        
+        # البحث السريع
+        for j, mah_row in mahwous_df.iterrows():
+            score = get_hybrid_score(comp_name, mah_row.get('product_name', ''), tfidf_matrix, comp_idx, j)
+            if score > best_score:
+                best_score = score
+                best_match_idx = j
                 
-                st.session_state.analysis_running = True
-                start_background_analysis(m_df, c_data)
-                st.rerun()
-            else:
-                st.error("الرجاء رفع كافة الملفات المطلوبة.")
+        # التصنيف الأولي
+        status = "Confirmed Missing"
+        confidence = "green"
+        match_name = ""
+        match_image = ""
         
-        if st.session_state.analysis_running:
-            if st.button("🛑 إيقاف المعالجة", type="secondary", use_container_width=True):
-                st.session_state.analysis_running = False
-                st.rerun()
-
-    # عرض التقدم المباشر
-    if st.session_state.analysis_running or st.session_state.processed_count > 0:
-        progress_container = st.container()
-        with progress_container:
-            cols = st.columns([4, 1])
-            progress = st.session_state.processed_count / st.session_state.total_count if st.session_state.total_count > 0 else 0
-            cols[0].progress(progress, text=f"جاري المعالجة: {st.session_state.processed_count} / {st.session_state.total_count}")
-            cols[1].write(f"**{progress*100:.1f}%**")
+        if best_match_idx != -1:
+            match_image = mahwous_df.iloc[best_match_idx].get('image_url', '')
             
-            if st.session_state.analysis_running:
-                time.sleep(0.5)
-                st.rerun()
-
-    # لوحة الإحصائيات والنتائج
-    if st.session_state.analysis_results:
-        df = pd.DataFrame(st.session_state.analysis_results)
-        df = df[~df['product_name'].isin(st.session_state.ignore_list)]
+            if best_score > 95:
+                status = "Exact Duplicate"
+                confidence = "red"
+                match_name = mahwous_df.iloc[best_match_idx].get('product_name', '')
+            elif best_score > 50:
+                # التحقق بالذكاء الاصطناعي
+                ai_res = await ai_deep_verify_single(comp_name, mahwous_df.iloc[best_match_idx].get('product_name', ''))
+                if ai_res.get("is_match"):
+                    status = "Exact Duplicate"
+                    confidence = "red"
+                    match_name = mahwous_df.iloc[best_match_idx].get('product_name', '')
+                else:
+                    status = "Potential Match"
+                    confidence = "yellow"
+                    match_name = f"{mahwous_df.iloc[best_match_idx].get('product_name', '')} ({ai_res.get('reason')})"
         
-        if not df.empty:
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("إجمالي المكتشف", len(df))
-            c2.metric("🟢 مفقود مؤكد", len(df[df['confidence_level'] == 'green']))
-            c3.metric("🟡 مراجعة", len(df[df['confidence_level'] == 'yellow']))
-            c4.metric("🔴 مكرر", len(df[df['confidence_level'] == 'red']))
+        return {
+            **comp_row,
+            "status": status,
+            "confidence_level": confidence,
+            "match_name": match_name,
+            "match_image": match_image,
+            "confidence_score": best_score,
+            "detection_date": datetime.now().strftime("%Y-%m-%d")
+        }
+    except Exception as e:
+        # إرجاع نتيجة آمنة في حال وقوع خطأ غير متوقع
+        return {
+            **comp_row,
+            "status": f"Error: {str(e)}",
+            "confidence_level": "red",
+            "match_name": "خطأ في المعالجة",
+            "match_image": "",
+            "confidence_score": 0,
+            "detection_date": datetime.now().strftime("%Y-%m-%d")
+        }
 
-            tab1, tab2, tab3 = st.tabs(["🟢 مفقود مؤكد", "🟡 يحتاج مراجعة", "🔴 مكرر"])
-            
-            def render_products(level):
-                filtered = df[df['confidence_level'] == level]
-                # التعديل 1: استخدام enumerate لإنشاء مفتاح فريد لكل زر لمنع الانهيار
-                for unique_id, (idx, row) in enumerate(filtered.iterrows()):
-                    with st.container():
-                        # التعديل 2: align-items: center; وتثبيت مقاسات الصور (120px)
-                        st.markdown(f"""
-                        <div class="product-card">
-                            <div style="display: flex; gap: 1.5rem; align-items: center;">
-                                <div style="flex: 1; text-align: center;">
-                                    <p style="font-size: 0.8rem; color: #64748b;">🏪 المنافس</p>
-                                    <img src="{row.get('image_url', '')}" style="width: 100%; max-width: 120px; height: 120px; border-radius: 0.5rem; border: 1px solid #e2e8f0; object-fit: contain; background-color: #f8fafc;" onerror="this.src='https://via.placeholder.com/120?text=No+Image'">
-                                </div>
-                                <div style="flex: 1; text-align: center;">
-                                    <p style="font-size: 0.8rem; color: #64748b;">📦 أقرب مطابقة لدينا</p>
-                                    <img src="{row.get('match_image', '')}" style="width: 100%; max-width: 120px; height: 120px; border-radius: 0.5rem; border: 1px solid #e2e8f0; object-fit: contain; background-color: #f8fafc;" onerror="this.style.display='none'">
-                                </div>
-                                <div style="flex: 3;">
-                                    <span class="badge badge-{row['confidence_level']}">{row['status']}</span>
-                                    <h3 style="margin: 0.5rem 0; font-size: 1.1rem;">{row['product_name']}</h3>
-                                    <p style="color: #3b82f6; font-weight: 700; font-size: 1.2rem;">{row['price']} ر.س</p>
-                                    <p style="color: #64748b; font-size: 0.9rem;">المنافس: {row.get('competitor_name', 'غير معروف')}</p>
-                                    <hr style="margin: 1rem 0; border: 0; border-top: 1px solid #e2e8f0;">
-                                    <p style="font-size: 0.95rem;"><b>أقرب مطابقة لدينا:</b> {row.get('match_name', 'لا يوجد')}</p>
-                                </div>
-                                <div style="flex: 1; display: flex; flex-direction: column; gap: 0.5rem;">
-                                    <p style="text-align: center; font-weight: 700; font-size: 0.9rem;">الإجراءات</p>
-                                </div>
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                        
-                        # أزرار الإجراءات مع المفاتيح الفريدة
-                        btn_cols = st.columns([4, 1.5, 1.5, 1.5])
-                        with btn_cols[1]:
-                            if st.button("✅ أضف لـ Make", key=f"make_{level}_{unique_id}"):
-                                res = send_products_to_make([row.to_dict()])
-                                if res['success']: st.toast("✅ تم الإرسال بنجاح!", icon="🚀")
-                                else: st.error("فشل الإرسال")
-                        with btn_cols[2]:
-                            if st.button("🔍 تحقق عميق", key=f"ai_{level}_{unique_id}"):
-                                with st.spinner("جاري إعادة التحقق..."):
-                                    res = asyncio.run(ai_deep_verify_single(row['product_name'], row.get('match_name', '')))
-                                    st.info(f"النتيجة: {res['reason']}")
-                        with btn_cols[3]:
-                            if st.button("🗑️ تجاهل", key=f"ign_{level}_{unique_id}"):
-                                st.session_state.ignore_list.add(row['product_name'])
-                                st.rerun()
+async def background_analysis_task(mahwous_df: pd.DataFrame, competitor_files_data: Dict[str, pd.DataFrame]):
+    """المهمة الخلفية لمعالجة كافة المنتجات مع معالجة أخطاء شاملة."""
+    try:
+        all_comp_list = []
+        for comp_name, df in competitor_files_data.items():
+            if not df.empty:
+                df['competitor_name'] = comp_name
+                all_comp_list.append(df)
+        
+        if not all_comp_list:
+            st.session_state.analysis_running = False
+            return
 
-            with tab1: render_products('green')
-            with tab2: render_products('yellow')
-            with tab3: render_products('red')
+        competitor_df = pd.concat(all_comp_list, ignore_index=True)
+        st.session_state.total_count = len(competitor_df)
+        st.session_state.processed_count = 0
+        st.session_state.analysis_results = []
+        st.session_state.analysis_running = True
+        
+        # تحضير TF-IDF
+        all_names = mahwous_df['product_name'].astype(str).tolist() + competitor_df['product_name'].astype(str).tolist()
+        vectorizer = TfidfVectorizer(preprocessor=normalize_arabic)
+        tfidf_matrix = vectorizer.fit_transform(all_names)
+        mahwous_len = len(mahwous_df)
+        
+        # معالجة المنتجات في دفعات متوازية
+        batch_size = 15
+        for i in range(0, len(competitor_df), batch_size):
+            try:
+                batch = competitor_df.iloc[i : i + batch_size]
+                tasks = []
+                for idx, row in batch.iterrows():
+                    tasks.append(process_item_pipeline(row.to_dict(), mahwous_df, tfidf_matrix, mahwous_len + idx, mahwous_len))
+                
+                # جمع نتائج الدفعة بشكل آمن
+                batch_results = await asyncio.gather(*tasks)
+                
+                # تحديث الحالة في Streamlit
+                st.session_state.analysis_results.extend(batch_results)
+                st.session_state.processed_count += len(batch_results)
+            except Exception as e:
+                print(f"Error in batch {i}: {e}")
+                # نضمن استمرار العداد حتى في حال فشل دفعة معينة
+                st.session_state.processed_count = min(st.session_state.processed_count + batch_size, st.session_state.total_count)
+                continue
+                
+        st.session_state.analysis_running = False
+        st.session_state.needs_rerun = True
+    except Exception as e:
+        print(f"Critical error in background task: {e}")
+        st.session_state.analysis_running = False
+        st.session_state.needs_rerun = True
 
-if __name__ == "__main__":
-    main()
+def start_background_analysis(mahwous_df: pd.DataFrame, competitor_files_data: Dict[str, pd.DataFrame]):
+    """بدء المعالجة في Thread منفصل لضمان عدم تجميد الواجهة."""
+    def run():
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(background_analysis_task(mahwous_df, competitor_files_data))
+            loop.close()
+        except Exception as e:
+            print(f"Thread Error: {e}")
+    
+    thread = threading.Thread(target=run)
+    from streamlit.runtime.scriptrunner import add_script_run_ctx
+    add_script_run_ctx(thread)
+    thread.start()
