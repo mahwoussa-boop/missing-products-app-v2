@@ -1,9 +1,10 @@
 """
-app.py v5.2 — واجهة المستخدم التفاعلية مع صور المقارنة والمزامنة النهائية
+app.py v6.0 — واجهة المستخدم التفاعلية (Visual Comparison & Live Progress)
 ═══════════════════════════════════════════════════════════
-- تصميم عريض وتفاعلي مع صور مقارنة (Side-by-Side)
-- معالجة في الخلفية (Threading) مع إصلاح التزامن
-- تحديث التقدم لحظياً ومزامنة الحالة النهائية عبر st.rerun()
+- تصميم عريض وتفاعلي مع مقارنة بصرية (صورة بصورة)
+- إصلاح ظهور شريط التقدم فور بدء التحليل
+- معالجة في الخلفية (Threading)
+- تحديث التقدم لحظياً (Live Updates)
 """
 
 import streamlit as st
@@ -32,7 +33,6 @@ if 'processed_count' not in st.session_state: st.session_state.processed_count =
 if 'total_count' not in st.session_state: st.session_state.total_count = 0
 if 'analysis_results' not in st.session_state: st.session_state.analysis_results = []
 if 'ignore_list' not in st.session_state: st.session_state.ignore_list = set()
-if 'needs_rerun' not in st.session_state: st.session_state.needs_rerun = False
 
 # 3. CSS مخصص
 st.markdown("""
@@ -71,28 +71,6 @@ st.markdown("""
         border-radius: 0.5rem;
         font-weight: 600;
     }
-    .image-container {
-        display: flex;
-        gap: 1.5rem;
-        justify-content: center;
-        align-items: center;
-        flex-wrap: wrap;
-    }
-    .product-img {
-        max-width: 140px;
-        height: 140px;
-        object-fit: contain;
-        border-radius: 0.5rem;
-        border: 1px solid #e2e8f0;
-        background: #f8fafc;
-    }
-    .img-label {
-        font-size: 0.75rem;
-        color: #64748b;
-        margin-bottom: 0.25rem;
-        text-align: center;
-        font-weight: 600;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -111,9 +89,12 @@ def main():
                 # تحميل البيانات
                 m_df = load_mahwous_store_data(mahwous_file)
                 c_data = {f.name: load_competitor_data(f) for f in competitor_files}
+                
+                # تفعيل حالة التشغيل فوراً ليعمل شريط التقدم دون تأخير
+                st.session_state.analysis_running = True
+                
                 # بدء المعالجة في الخلفية
                 start_background_analysis(m_df, c_data)
-                st.session_state.needs_rerun = False
                 st.rerun()
             else:
                 st.error("الرجاء رفع كافة الملفات المطلوبة.")
@@ -122,11 +103,6 @@ def main():
             if st.button("🛑 إيقاف المعالجة", type="secondary", use_container_width=True):
                 st.session_state.analysis_running = False
                 st.rerun()
-
-    # المزامنة النهائية
-    if st.session_state.needs_rerun and not st.session_state.analysis_running:
-        st.session_state.needs_rerun = False
-        st.rerun()
 
     # عرض التقدم المباشر
     if st.session_state.analysis_running or st.session_state.processed_count > 0:
@@ -138,7 +114,7 @@ def main():
             cols[1].write(f"**{progress*100:.1f}%**")
             
             if st.session_state.analysis_running:
-                time.sleep(1) # تقليل تكرار التحديث لزيادة الاستقرار
+                time.sleep(0.5)
                 st.rerun()
 
     # لوحة الإحصائيات والنتائج
@@ -161,39 +137,33 @@ def main():
                 filtered = df[df['confidence_level'] == level]
                 for _, row in filtered.iterrows():
                     with st.container():
-                        # تجهيز صور المقارنة
-                        comp_img = row.get('image_url', '')
-                        match_img = row.get('match_image', '')
-                        
                         st.markdown(f"""
                         <div class="product-card">
-                            <div style="display: flex; gap: 2rem; align-items: start; flex-wrap: wrap;">
-                                <div class="image-container" style="flex: 1.5; min-width: 320px;">
-                                    <div style="flex: 1;">
-                                        <p class="img-label">صورة المنافس</p>
-                                        <img src="{comp_img}" class="product-img">
-                                    </div>
-                                    <div style="flex: 1;">
-                                        <p class="img-label">أقرب مطابقة لدينا</p>
-                                        <img src="{match_img}" class="product-img">
-                                    </div>
+                            <div style="display: flex; gap: 1.5rem; align-items: start;">
+                                <div style="flex: 1; text-align: center;">
+                                    <p style="font-size: 0.8rem; color: #64748b;">🏪 المنافس</p>
+                                    <img src="{row.get('image_url', '')}" style="width: 100%; max-width: 140px; border-radius: 0.5rem; border: 1px solid #e2e8f0; object-fit: contain;" onerror="this.src='https://via.placeholder.com/140?text=No+Image'">
                                 </div>
-                                <div style="flex: 3; min-width: 300px;">
+                                <div style="flex: 1; text-align: center;">
+                                    <p style="font-size: 0.8rem; color: #64748b;">📦 أقرب مطابقة لدينا</p>
+                                    <img src="{row.get('match_image', '')}" style="width: 100%; max-width: 140px; border-radius: 0.5rem; border: 1px solid #e2e8f0; object-fit: contain;" onerror="this.style.display='none'">
+                                </div>
+                                <div style="flex: 3;">
                                     <span class="badge badge-{row['confidence_level']}">{row['status']}</span>
-                                    <h3 style="margin: 0.5rem 0;">{row['product_name']}</h3>
+                                    <h3 style="margin: 0.5rem 0; font-size: 1.1rem;">{row['product_name']}</h3>
                                     <p style="color: #3b82f6; font-weight: 700; font-size: 1.2rem;">{row['price']} ر.س</p>
-                                    <p style="color: #64748b;">الماركة: {row.get('brand', 'غير معروف')} | المنافس: {row.get('competitor_name', 'غير معروف')}</p>
+                                    <p style="color: #64748b; font-size: 0.9rem;">المنافس: {row.get('competitor_name', 'غير معروف')}</p>
                                     <hr style="margin: 1rem 0; border: 0; border-top: 1px solid #e2e8f0;">
-                                    <p><b>أقرب مطابقة لدينا:</b> {row.get('match_name', 'لا يوجد')}</p>
+                                    <p style="font-size: 0.95rem;"><b>أقرب مطابقة لدينا:</b> {row.get('match_name', 'لا يوجد')}</p>
                                 </div>
-                                <div style="flex: 1; display: flex; flex-direction: column; gap: 0.5rem; min-width: 150px;">
-                                    <p style="text-align: center; font-weight: 700;">الإجراءات</p>
+                                <div style="flex: 1; display: flex; flex-direction: column; gap: 0.5rem;">
+                                    <p style="text-align: center; font-weight: 700; font-size: 0.9rem;">الإجراءات</p>
                                 </div>
                             </div>
                         </div>
                         """, unsafe_allow_html=True)
                         
-                        # أزرار الإجراءات
+                        # أزرار الإجراءات (خارج الـ HTML لتعمل مع Streamlit)
                         btn_cols = st.columns([4, 1.5, 1.5, 1.5])
                         with btn_cols[1]:
                             if st.button("✅ أضف لـ Make", key=f"make_{row['product_name']}"):
