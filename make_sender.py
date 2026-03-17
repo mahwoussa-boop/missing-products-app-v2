@@ -1,20 +1,19 @@
 """
 make_sender.py — مدير الإرسال لأتمتة Make.com
 ═══════════════════════════════════════════════════════════════
-- تم تحديث الهيكلة لتطابق سيناريو "المنتجات المفقودة/الجديدة".
-- إضافة دعم (صورة المنتج) و (الوصف) المولد بأسلوب متجر مهووس.
-- إرسال البيانات داخل مصفوفة {"data": [...]} كما يطلبها السيناريو.
+- تم ضبطه ليستقبل (الاسم، السعر، الصورة المسحوبة، والوصف المولد).
+- يرسل البيانات بصيغة مصفوفة {"data": [...]} المطابقة لسيناريو مهووس.
+- حماية ضد الأخطاء لكي لا يتوقف السيناريو.
 """
 
 import requests
-import json
 import os
 from typing import List, Dict
 
-# رابط Webhook الخاص بإضافة المنتجات الجديدة (المفقودة)
+# رابط Webhook الخاص بسيناريو المنتجات المفقودة في Make
 WEBHOOK_URL = os.environ.get(
     "WEBHOOK_NEW_PRODUCTS", 
-    "https://hook.eu2.make.com/xvubj23dmpxu8qzilstd25cnumrwtdxm" # رابط افتراضي احتياطي
+    "https://hook.eu2.make.com/xvubj23dmpxu8qzilstd25cnumrwtdxm" # تأكد من أن هذا الرابط هو الصحيح لسيناريو مهووس
 )
 
 def send_products_to_make(products: List[Dict]) -> Dict:
@@ -27,9 +26,9 @@ def send_products_to_make(products: List[Dict]) -> Dict:
     formatted_products = []
     
     for p in products:
-        # استخراج البيانات بذكاء لتدعم مفاتيح مختلفة
-        name = str(p.get("product_name", p.get("name", p.get("منتج_المنافس", "")))).strip()
-        price = p.get("price", p.get("سعر_المنافس", 0))
+        # استخراج البيانات الأساسية
+        name = str(p.get("product_name", p.get("name", ""))).strip()
+        price = p.get("price", 0)
         
         try:
             price = float(price)
@@ -48,13 +47,13 @@ def send_products_to_make(products: List[Dict]) -> Dict:
             "السعر المخفض": 0
         }
         
-        # إضافة الوصف إذا تم توليده عبر خبير مهووس
-        description = str(p.get("description", p.get("الوصف", ""))).strip()
+        # 1. إضافة الوصف (يتم توليده بتنسيق مهووس من app.py قبل الإرسال)
+        description = str(p.get("description", "")).strip()
         if description:
             item["الوصف"] = description
             
-        # إضافة رابط الصورة إذا تم جلبه
-        image_url = str(p.get("image_url", p.get("صورة المنتج", ""))).strip()
+        # 2. إضافة الصورة (يتم سحبها من المنافس أو الإنترنت في app.py)
+        image_url = str(p.get("image_url", "")).strip()
         if image_url and image_url.startswith("http"):
             item["صورة المنتج"] = image_url
 
@@ -63,7 +62,7 @@ def send_products_to_make(products: List[Dict]) -> Dict:
     if not formatted_products:
         return {"success": False, "message": "❌ لم يتم العثور على منتجات صالحة للإرسال"}
 
-    # ── تغليف البيانات في مفتاح "data" كما يقرأها BasicFeeder في Make ──
+    # ── تغليف البيانات في مفتاح "data" كما يقرأها السيناريو في Make ──
     payload = {"data": formatted_products}
 
     try:
@@ -71,15 +70,15 @@ def send_products_to_make(products: List[Dict]) -> Dict:
             WEBHOOK_URL,
             json=payload,
             headers={"Content-Type": "application/json"},
-            timeout=15
+            timeout=20
         )
         
         if response.status_code in (200, 201, 204):
-            return {"success": True, "message": f"✅ تم إرسال {len(formatted_products)} منتج إلى Make بنجاح"}
+            return {"success": True, "message": f"✅ تم إرسال {len(formatted_products)} منتج بنجاح لـ Make"}
         else:
-            return {"success": False, "message": f"❌ خطأ من Make ({response.status_code}): {response.text[:100]}"}
+            return {"success": False, "message": f"❌ خطأ من Make ({response.status_code}): يرجى فحص السيناريو"}
             
     except requests.exceptions.Timeout:
-        return {"success": False, "message": "❌ انتهت مهلة الاتصال بالخادم (Timeout)"}
+        return {"success": False, "message": "❌ انتهت مهلة الاتصال بخادم Make"}
     except Exception as e:
         return {"success": False, "message": f"❌ خطأ في الاتصال: {str(e)[:100]}"}
