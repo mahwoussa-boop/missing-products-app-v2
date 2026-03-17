@@ -224,8 +224,18 @@ def _build_description(name: str, brand: str, price: float) -> str:
 def prepare_final_payload(p: Dict[str, Any]) -> Dict[str, Any]:
     """
     تجهيز الـ Payload النهائي للمنتج.
-    يرسل الحقول بالأسماء العربية المتوافقة مع Blueprint v5.
+    يرسل الحقول بالأسماء العربية المتوافقة مع Blueprint v8.
+    يستخدم IDs التصنيفات والماركات المحفوظة في salla_ids_manager.
     """
+    # استيراد مدير IDs سلة
+    try:
+        from salla_ids_manager import get_category_id, get_brand_id
+        _ids_manager_available = True
+    except ImportError:
+        _ids_manager_available = False
+        def get_category_id(x): return ""
+        def get_brand_id(x): return ""
+
     # استخراج البيانات الأساسية
     name = str(p.get("product_name", p.get("name", ""))).strip()
     brand_raw = str(p.get("brand", "")).strip()
@@ -240,6 +250,10 @@ def prepare_final_payload(p: Dict[str, Any]) -> Dict[str, Any]:
     categories = _smart_categorize(name, brand_raw)
     category_name = categories[0] if categories else 'العطور'
 
+    # ─── جلب IDs التصنيفات والماركات من قاعدة البيانات المحلية ───
+    category_id = get_category_id(category_name)
+    brand_id = get_brand_id(brand) if brand else ""
+
     # بناء حقول SEO
     seo = _build_seo_fields(name, brand, category_name)
 
@@ -248,9 +262,9 @@ def prepare_final_payload(p: Dict[str, Any]) -> Dict[str, Any]:
     if not description:
         description = _build_description(name, brand, price)
 
-    # ─── بناء الـ Payload بالأسماء العربية المتوافقة مع Blueprint v5 ───
+    # ─── بناء الـ Payload بالأسماء العربية المتوافقة مع Blueprint v8 ───
     item = {
-        # الحقول الأساسية (عربية - تتوافق مع Blueprint v5 mapper)
+        # الحقول الأساسية (عربية - تتوافق مع Blueprint v8 mapper)
         "أسم المنتج": name,
         "سعر المنتج": price,
         "الوصف": description,
@@ -263,8 +277,11 @@ def prepare_final_payload(p: Dict[str, Any]) -> Dict[str, Any]:
         # SEO
         "metadata_title": seo["عنوان الصفحة"],
         "metadata_description": seo["وصف الصفحة"],
-        # التصنيف والماركة (إنجليزية لأن Salla يحتاج ID وليس نص)
+        # التصنيف: ID رقمي إذا متوفر، وإلا الاسم كنص
+        "category_id": category_id,
         "category_name": category_name,
+        # الماركة: ID رقمي إذا متوفر، وإلا الاسم كنص
+        "brand_id": brand_id,
         "brand_name": brand if brand else "",
         # حقل مرجعي
         "product_id": str(p.get("product_id", "")).strip(),
