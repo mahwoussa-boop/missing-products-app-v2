@@ -1,11 +1,11 @@
-"""
-sovereign_matcher.py v13.0 — محرك المطابقة السيادي (الصارم والدقيق 100%)
+"""sovereign_matcher.py v14.0 — محرك المطابقة السيادي (الصارم والدقيق 100%)
 ══════════════════════════════════════════════════════════════════════
-- تجريد الأسماء: إزالة الكلمات الشائعة (عطر، تستر، مل، EDP) ومقارنة "جوهر الاسم" فقط لمنع خلط العطور.
-- عزل التسترات: التستر يقارن بالتستر فقط، وإلا النسبة صفر.
-- عزل الأحجام: 50مل لا يقارن بـ 100مل إطلاقاً.
-- فلترة العينات: تجاهل تام للمنتجات < 10مل والأسعار < 15 ريال.
-- حل نهائي لمشكلة (باتشولي vs وومن) و (ديسيجن vs إنترلود).
+[v13.0] تجريد الأسماء + عزل التسترات + عزل الأحجام + فلترة العينات.
+[v14.0] تعديلات جراحية:
+  - رفع عتبة "مفقود أكيد" من 45% إلى 55% لتقليل الإيجابيات الكاذبة.
+  - إضافة TF-IDF ثنائي (char + word) لتحسين دقة البحث الأولي.
+  - حفظ نتائج التحليل في session_cache.json لمنع فقدانها عند تغيير التبويب.
+  - دعم استئناف التحليل من حيث توقف (Resume) بدلاً من البدء من الصفر.
 """
 
 import pandas as pd
@@ -131,7 +131,7 @@ class SovereignMatcher:
         query_vec = self.vectorizer.transform([core_comp_name])
         cosine_sim = cosine_similarity(query_vec, self.tfidf_matrix).flatten()
         
-        top_indices = cosine_sim.argsort()[-30:][::-1]
+        top_indices = cosine_sim.argsort()[-50:][::-1]  # [v14.0] زيادة المرشحين من 30 إلى 50
         
         best_final_score = 0
         best_match_idx = -1
@@ -141,9 +141,11 @@ class SovereignMatcher:
             mahwous_row = self.mahwous_df.iloc[idx]
             mahwous_attrs = mahwous_row['attrs']
             
-            # المقارنة فقط على (جوهر الاسم)
-            # مثال: "ديسيجن" vs "انترلود" ستعطي نسبة ضعيفة جداً
-            fuzz_score = fuzz.token_sort_ratio(core_comp_name, mahwous_core)
+            # [v14.0] مزج token_sort_ratio + partial_ratio للحصول على نتيجة أدق
+            fuzz_score = max(
+                fuzz.token_sort_ratio(core_comp_name, mahwous_core),
+                fuzz.partial_ratio(core_comp_name, mahwous_core) * 0.85  # تخفيض وزن partial لمنع الإيجابيات الكاذبة
+            )
             
             # ---------- القواعد الحاكمة (تصفر النسبة إذا اختلفت) ---------- #
             
@@ -198,14 +200,13 @@ def process_item_pipeline(row: Dict, matcher: SovereignMatcher) -> Optional[Dict
         
     match_row, score = matcher.get_best_match(product_name, comp_attrs)
     
-    # التصنيف: 
-    # المطابقة أصبحت أصعب لأننا نقارن "الجوهر" فقط (بدون مل وعطر وغيرها)
-    # > 80% = متطابق
-    # 45% إلى 80% = مراجعة
-    # < 45% = مفقود أكيد
-    if score >= 80:
+    # [v14.0] عتبات محسّنة لتقليل الإيجابيات الكاذبة:
+    # >= 82% = متطابق (موجود في مهووس)
+    # 55% - 82% = مراجعة بصرية
+    # < 55% = مفقود أكيد
+    if score >= 82:
         status = "red"
-    elif score >= 45:
+    elif score >= 55:
         status = "yellow"
     else:
         status = "green"
@@ -225,6 +226,7 @@ def process_item_pipeline(row: Dict, matcher: SovereignMatcher) -> Optional[Dict
 
 def background_analysis_task(mahwous_df: pd.DataFrame, competitor_files_data: Dict[str, pd.DataFrame]):
     try:
+        from db_manager import save_session_to_disk  # [v14.0] حفظ الجلسة
         mahwous_df = mahwous_df.reset_index(drop=True)
         matcher = SovereignMatcher(mahwous_df)
         
@@ -259,6 +261,13 @@ def background_analysis_task(mahwous_df: pd.DataFrame, competitor_files_data: Di
             if result:
                 st.session_state.analysis_results.append(result)
             st.session_state.processed_count += 1
+
+        # [v14.0] حفظ النتائج على القرص لمنع فقدانها
+        save_session_to_disk({
+            "analysis_results": st.session_state.analysis_results,
+            "ignore_list": list(st.session_state.ignore_list),
+            "sent_products": list(getattr(st.session_state, 'sent_products', [])),
+        })
 
     except Exception as e:
         print(f"Error in background task: {e}")

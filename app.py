@@ -1,14 +1,10 @@
-"""
-app.py v14.8 — الواجهة السيادية المتكاملة (النسخة الضخمة الشاملة + المنطق الهجين الصارم)
+"""app.py v15.0 — الواجهة السيادية المتكاملة
 ══════════════════════════════════════════════════════════════════════
-- جميع ميزات V10 + V12 + V13 + V14.5 محفوظة بالكامل.
-- شريط تقدم (Progress Bar) لحظي دقيق ومؤشر حالة.
-- نظام صفحات (25 منتج/صفحة) لكل قسم بشكل مستقل.
-- فلاتر شاملة (البحث، المنافس، الماركة) لكل تبويب.
-- نظام حماية الصور (HTML Rendering) لمنع تعطل الواجهة.
-- سحب تلقائي للصور المفقودة وتوليد وصف "خبير مهووس" عند الإرسال لـ Make.
-- عرض المتاجر المتعددة (Tags) داخل بطاقة المنتج الواحد.
-- دمج المنطق الهجين الصارم: تمرير رابط صورة المنافس للدالة الهجينة.
+[v14.8] جميع ميزات V10-V14.8 محفوظة بالكامل.
+[v15.0] تعديلات جراحية:
+  - تبويب جديد "✅ المنتجات المرسلة" لأرشيف المرسلات ومنع التكرار.
+  - حفظ الجلسة على القرص (session_cache.json) واستعادتها تلقائياً.
+  - عند الضغط على "إرسال"، يختفي المنتج من الأقسام وينتقل لأرشيف المرسلات.
 """
 
 import streamlit as st
@@ -19,7 +15,7 @@ import math
 import urllib.parse
 
 from config import APP_TITLE, APP_VERSION, APP_ICON
-from db_manager import load_mahwous_store_data, load_competitor_data
+from db_manager import load_mahwous_store_data, load_competitor_data, load_session_from_disk, save_session_to_disk
 from sovereign_matcher import start_sovereign_analysis, ai_verify_match
 from make_sender import send_products_to_make
 
@@ -39,14 +35,22 @@ st.set_page_config(page_title=f"{APP_TITLE} {APP_VERSION}", page_icon=APP_ICON, 
 if 'analysis_running' not in st.session_state: st.session_state.analysis_running = False
 if 'processed_count' not in st.session_state: st.session_state.processed_count = 0
 if 'total_count' not in st.session_state: st.session_state.total_count = 0
-if 'analysis_results' not in st.session_state: st.session_state.analysis_results = []
-if 'ignore_list' not in st.session_state: st.session_state.ignore_list = set()
 if 'needs_rerun' not in st.session_state: st.session_state.needs_rerun = False
 if 'ai_verifications' not in st.session_state: st.session_state.ai_verifications = {}
+
+# [v15.0] تحميل الجلسة المحفوظة من القرص عند بدء التطبيق
+if 'analysis_results' not in st.session_state:
+    _cached = load_session_from_disk()
+    st.session_state.analysis_results = _cached.get('analysis_results', [])
+    st.session_state.ignore_list = set(_cached.get('ignore_list', []))
+    st.session_state.sent_products = set(_cached.get('sent_products', []))
+if 'ignore_list' not in st.session_state: st.session_state.ignore_list = set()
+if 'sent_products' not in st.session_state: st.session_state.sent_products = set()  # [v15.0] أرشيف المرسلات
 
 # فصل التحديد الجماعي لكل قسم
 if 'selected_green' not in st.session_state: st.session_state.selected_green = set()
 if 'selected_yellow' not in st.session_state: st.session_state.selected_yellow = set()
+if 'page_sent' not in st.session_state: st.session_state.page_sent = 1  # [v15.0] صفحة أرشيف المرسلات
 
 # تهيئة أرقام الصفحات لكل تبويب بشكل مستقل
 if 'page_green' not in st.session_state: st.session_state.page_green = 1
@@ -154,12 +158,26 @@ def main():
         stat3.metric("🟡 مراجعة بصرية", len(results_df[results_df['confidence_level'] == 'yellow']))
         stat4.metric("🔴 مكرر/متوفر", len(results_df[results_df['confidence_level'] == 'red']))
 
+        # [v15.0] إخفاء المنتجات المرسلة من النتائج الظاهرة
+        results_df = results_df[~results_df['product_name'].isin(st.session_state.sent_products)]
+
         # تقسيم التبويبات بنسب التأكد المطلوبة
-        tab_missing, tab_review, tab_matched = st.tabs([
-            f"🟢 مفقودة (تأكد 95%-100%) ({len(results_df[results_df['confidence_level'] == 'green'])})", 
-            f"🟡 مراجعة بصرية (شک 80%-95%) ({len(results_df[results_df['confidence_level'] == 'yellow'])})", 
-            f"🔴 مكررة (تأكد 90%-100%) ({len(results_df[results_df['confidence_level'] == 'red'])})"
+        sent_count = len(st.session_state.sent_products)
+        tab_missing, tab_review, tab_matched, tab_sent = st.tabs([
+            f"🟢 مفقودة (تأكد 95%-100%) ({len(results_df[results_df['confidence_level'] == 'green'])})",
+            f"🟡 مراجعة بصرية (شك 80%-95%) ({len(results_df[results_df['confidence_level'] == 'yellow'])})",
+            f"🔴 مكررة (تأكد 90%-100%) ({len(results_df[results_df['confidence_level'] == 'red'])})",
+            f"✅ المرسلة ({sent_count})",
         ])
+
+        # [v15.0] دالة مساعدة لتسجيل إرسال منتج وحفظه في الأرشيف
+        def mark_as_sent(product_name: str):
+            st.session_state.sent_products.add(product_name)
+            save_session_to_disk({
+                "analysis_results": st.session_state.analysis_results,
+                "ignore_list": list(st.session_state.ignore_list),
+                "sent_products": list(st.session_state.sent_products),
+            })
 
         # دالة الفلترة الديناميكية
         def get_filter_options(df_part, col):
@@ -273,15 +291,16 @@ def main():
                                 try:
                                     with st.spinner("يولد الوصف ويرسل..."):
                                         row_dict = row.to_dict()
-                                        # المنطق الهجين الصارم: توليد الوصف وسحب الصور
                                         row_dict['description'] = generate_mahwous_description(row['product_name'], row['price'], row.get('brand', ''))
                                         img_res = fetch_product_images(row['product_name'], row.get('brand', ''), row.get('image_url'))
                                         if img_res['success']:
                                             row_dict['image_url'] = img_res['images'][0]['url']
                                             row_dict['all_images'] = [img['url'] for img in img_res['images']]
-                                        
                                         res = send_products_to_make([row_dict])
-                                        if res['success']: st.toast("تم الإرسال لـ Make بنجاح!", icon="✅")
+                                        if res['success']:
+                                            mark_as_sent(row['product_name'])  # [v15.0]
+                                            st.toast("تم الإرسال لـ Make بنجاح!", icon="✅")
+                                            st.rerun()
                                         else: st.error(res['message'])
                                 except Exception as e: st.error(f"خطأ: {e}")
 
@@ -346,14 +365,16 @@ def main():
                         if btn_col[3].button("📤 إرسال لـ Make", key=f"send_y_{idx}", type="primary"):
                             with st.spinner("يولد الوصف ويرسل..."):
                                 p_dict = row.to_dict()
-                                # المنطق الهجين الصارم
                                 p_dict['description'] = generate_mahwous_description(row['product_name'], row['price'], row.get('brand', ''))
                                 img_res = fetch_product_images(row['product_name'], row.get('brand', ''), row.get('image_url'))
                                 if img_res['success']:
                                     p_dict['image_url'] = img_res['images'][0]['url']
                                     p_dict['all_images'] = [img['url'] for img in img_res['images']]
                                 res = send_products_to_make([p_dict])
-                                if res['success']: st.toast("تم الإرسال!", icon="✅")
+                                if res['success']:
+                                    mark_as_sent(row['product_name'])  # [v15.0]
+                                    st.toast("تم الإرسال!", icon="✅")
+                                    st.rerun()
                                 else: st.error(res['message'])
 
                         if btn_col[4].button("🗑️", key=f"ign_y_{idx}"):
@@ -416,6 +437,65 @@ def main():
                             st.session_state.ignore_list.add(row['product_name'])
                             st.rerun()
                         st.markdown('</div>', unsafe_allow_html=True)
+
+        # =========================================================
+        # ✅ التبويب الرابع [v15.0]: أرشيف المنتجات المرسلة
+        # =========================================================
+        with tab_sent:
+            all_results_df = pd.DataFrame(st.session_state.analysis_results)
+            if all_results_df.empty or 'product_name' not in all_results_df.columns:
+                st.info("لم يتم إرسال أي منتج بعد.")
+            else:
+                sent_df = all_results_df[
+                    all_results_df['product_name'].isin(st.session_state.sent_products)
+                ].copy()
+
+                if sent_df.empty:
+                    st.info("لم يتم إرسال أي منتج بعد.")
+                else:
+                    st.success(f"✅ تم إرسال **{len(sent_df)}** منتج إلى Make بنجاح.")
+
+                    total_p_sent = math.ceil(len(sent_df) / ITEMS_PER_PAGE)
+                    if st.session_state.page_sent > total_p_sent: st.session_state.page_sent = total_p_sent
+
+                    nav_s1, nav_s2, nav_s3, nav_s4 = st.columns([2, 1, 1, 1])
+                    with nav_s1:
+                        if st.button("🗑️ تفريغ الأرشيف", key="clear_sent", type="secondary"):
+                            st.session_state.sent_products = set()
+                            save_session_to_disk({
+                                "analysis_results": st.session_state.analysis_results,
+                                "ignore_list": list(st.session_state.ignore_list),
+                                "sent_products": [],
+                            })
+                            st.rerun()
+                    with nav_s2: st.button("⬅️", key="p_s", on_click=prev_page, args=("page_sent",), disabled=(st.session_state.page_sent == 1))
+                    with nav_s3: st.markdown(f"<p style='text-align:center;'>{st.session_state.page_sent} / {total_p_sent}</p>", unsafe_allow_html=True)
+                    with nav_s4: st.button("➡️", key="n_s", on_click=next_page, args=("page_sent",), disabled=(st.session_state.page_sent == total_p_sent))
+
+                    st.divider()
+                    start_s = (st.session_state.page_sent - 1) * ITEMS_PER_PAGE
+                    for idx, row in sent_df.iloc[start_s : start_s + ITEMS_PER_PAGE].iterrows():
+                        with st.container():
+                            st.markdown('<div class="product-card" style="border-color:#28a745;">', unsafe_allow_html=True)
+                            s_img, s_info = st.columns([2, 7])
+                            with s_img:
+                                st.markdown(render_image(row.get('image_url')), unsafe_allow_html=True)
+                            with s_info:
+                                st.subheader(f"✅ {row['product_name']}")
+                                st.markdown(f"<span class='price-text'>{row.get('price', 0)} ر.س</span>", unsafe_allow_html=True)
+                                comp_list = str(row.get('competitor_name', '')).split('،')
+                                comp_html = "".join([f"<span class='competitor-tag'>🏪 {c.strip()}</span>" for c in comp_list if c.strip()])
+                                st.markdown(comp_html, unsafe_allow_html=True)
+                                st.caption(f"🏷️ الماركة: {row.get('brand', 'غير محدد')}")
+                                if st.button("↩️ إعادة للقائمة", key=f"unsend_{idx}"):
+                                    st.session_state.sent_products.discard(row['product_name'])
+                                    save_session_to_disk({
+                                        "analysis_results": st.session_state.analysis_results,
+                                        "ignore_list": list(st.session_state.ignore_list),
+                                        "sent_products": list(st.session_state.sent_products),
+                                    })
+                                    st.rerun()
+                            st.markdown('</div>', unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
