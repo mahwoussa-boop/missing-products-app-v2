@@ -1,11 +1,12 @@
 """
-ai_engine.py — محرك الذكاء الاصطناعي والميزات المتقدمة (الإصدار الشامل)
+ai_engine.py — محرك الذكاء الاصطناعي والميزات المتقدمة (الإصدار الشامل V12.0)
 ═══════════════════════════════════════════════════════════════
 - جلب صور المنتجات من الإنترنت و Fragrantica.
 - استخراج الهرم العطري (مكونات العطر).
 - توليد وصف احترافي SEO بأسلوب متجر مهووس عند الإرسال لـ Make.
 - البحث في السوق السعودي عن الأسعار.
 - التحقق التلقائي في متجر مهووس.
+- نظام التقاط الأخطاء الصارم لعرض سبب العطل للمستخدم مباشرة.
 """
 
 import requests
@@ -20,11 +21,12 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 def _parse_json(txt):
-    """دالة مساعدة لاستخراج وتحليل JSON من رد الذكاء الاصطناعي."""
+    """دالة مساعدة لاستخراج وتحليل JSON من رد الذكاء الاصطناعي بأمان."""
     if not txt: return None
     try:
         clean = re.sub(r'```json|```', '', txt).strip()
-        s = clean.find('{'); e = clean.rfind('}') + 1
+        s = clean.find('{')
+        e = clean.rfind('}') + 1
         if s >= 0 and e > s:
             return json.loads(clean[s:e])
     except Exception as e:
@@ -51,8 +53,8 @@ def _search_ddg(query, num_results=3):
     return []
 
 def fetch_product_images(product_name, brand=""):
-    """جلب روابط صور المنتج النظيفة من Fragrantica أو Google."""
-    if not GEMINI_API_KEY: return {"images": [], "success": False}
+    """جلب روابط صور المنتج النظيفة من Fragrantica أو Google مع التقاط الأخطاء."""
+    if not GEMINI_API_KEY: return {"images": [], "success": False, "message": "مفتاح API غير متوفر"}
     
     images = []
     fragrantica_url = ""
@@ -81,21 +83,27 @@ def fetch_product_images(product_name, brand=""):
                 images.append({"url": main, "source": "Fragrantica", "alt": product_name})
             fragrantica_url = data.get("fragrantica_url", "")
     except Exception as e:
-        print(f"Image Fetch AI Error: {e}")
+        return {"images": [], "success": False, "message": f"خطأ في الاتصال بالذكاء الاصطناعي: {str(e)}"}
 
     # إذا لم يجد صورة، نستخدم البحث كبديل
     if not images:
-        ddg = _search_ddg(f"{product_name} perfume bottle image official")
-        for r in ddg[:2]:
-            url = r.get("url", "")
-            if any(ext in url.lower() for ext in [".jpg", ".png", ".webp"]):
-                images.append({"url": url, "source": "Web", "alt": product_name})
+        try:
+            ddg = _search_ddg(f"{product_name} perfume bottle image official")
+            for r in ddg[:2]:
+                url = r.get("url", "")
+                if any(ext in url.lower() for ext in [".jpg", ".png", ".webp"]):
+                    images.append({"url": url, "source": "Web", "alt": product_name})
+        except Exception as e:
+            return {"images": [], "success": False, "message": f"خطأ في محرك البحث: {str(e)}"}
 
-    return {"images": images, "fragrantica_url": fragrantica_url, "success": len(images) > 0}
+    if not images:
+        return {"images": [], "fragrantica_url": fragrantica_url, "success": False, "message": "لم يتم العثور على صور مناسبة."}
+
+    return {"images": images, "fragrantica_url": fragrantica_url, "success": True, "message": "تم جلب الصور بنجاح."}
 
 def fetch_fragrantica_info(product_name):
-    """جلب الهرم العطري ومكونات العطر من Fragrantica."""
-    if not GEMINI_API_KEY: return {"success": False}
+    """جلب الهرم العطري ومكونات العطر من Fragrantica مع التقاط الأخطاء."""
+    if not GEMINI_API_KEY: return {"success": False, "message": "مفتاح API غير متوفر"}
     model = genai.GenerativeModel('gemini-2.0-flash')
     
     prompt = f"""ابحث عن العطر "{product_name}" في موقع fragranticarabia.com واستخرج:
@@ -119,10 +127,12 @@ def fetch_fragrantica_info(product_name):
     try:
         response = model.generate_content(prompt)
         data = _parse_json(response.text)
-        if data: return {"success": True, **data}
+        if data: 
+            return {"success": True, **data}
+        else:
+            return {"success": False, "message": "لم يتم العثور على معلومات العطر في Fragrantica."}
     except Exception as e:
-        print(f"Fragrantica Info Error: {e}")
-    return {"success": False}
+        return {"success": False, "message": f"خطأ أثناء جلب المكونات: {str(e)}"}
 
 def generate_mahwous_description(product_name, price, fragrantica_data=None):
     """خبير مهووس لتوليد وصف SEO حصري بطول 1000-1200 كلمة عند الإرسال لـ Make."""
@@ -162,17 +172,19 @@ def generate_mahwous_description(product_name, price, fragrantica_data=None):
         text = re.sub(r'```markdown|```html|```', '', response.text).strip()
         return text
     except Exception as e:
-        return f"عطر {product_name} الرائع متوفر الآن. (حدث خطأ أثناء التوليد المطول: {str(e)})"
+        # إرجاع وصف بسيط في حال فشل الذكاء الاصطناعي لكي لا يتوقف الإرسال لـ Make
+        return f"عطر {product_name} الرائع متوفر الآن في متجر مهووس بسعر {price} ريال. (ملاحظة: تعذر توليد الوصف المطول بسبب خطأ: {str(e)})"
 
 def search_market_price(product_name, our_price=0):
-    """بحث ذكي عن أسعار المنتج في السوق السعودي للمقارنة."""
-    if not GEMINI_API_KEY: return {"success": False}
+    """بحث ذكي عن أسعار المنتج في السوق السعودي للمقارنة مع التقاط الأخطاء."""
+    if not GEMINI_API_KEY: return {"success": False, "message": "مفتاح API غير متوفر"}
     model = genai.GenerativeModel('gemini-2.0-flash')
     
-    ddg = _search_ddg(f"سعر {product_name} السعودية نايس ون قولدن سنت سلة")
-    web_ctx = "\n".join(f"- {r['snippet'][:120]}" for r in ddg)
-    
-    prompt = f"""تحليل سوق للمنتج في السعودية:
+    try:
+        ddg = _search_ddg(f"سعر {product_name} السعودية نايس ون قولدن سنت سلة")
+        web_ctx = "\n".join(f"- {r['snippet'][:120]}" for r in ddg)
+        
+        prompt = f"""تحليل سوق للمنتج في السعودية:
 المنتج: {product_name}
 سعرنا/سعر المنافس الحالي: {our_price} ريال
 المعلومات من الويب: {web_ctx}
@@ -185,31 +197,34 @@ def search_market_price(product_name, our_price=0):
   "recommendation": "توصية تسعير قصيرة"
 }}"""
 
-    try:
         response = model.generate_content(prompt)
         data = _parse_json(response.text)
-        if data: return {"success": True, **data}
+        if data: 
+            return {"success": True, **data}
+        else:
+            return {"success": False, "message": "تعذر استخراج بيانات السعر من السوق."}
     except Exception as e:
-        print(f"Market Price Error: {e}")
-    return {"success": False, "market_price": 0}
+        return {"success": False, "message": f"خطأ أثناء جلب الأسعار: {str(e)}"}
 
 def search_mahwous(product_name):
     """التحقق السريع مما إذا كان المنتج متوفراً بالفعل في متجر مهووس عبر محرك البحث."""
-    if not GEMINI_API_KEY: return {"success": False}
+    if not GEMINI_API_KEY: return {"success": False, "message": "مفتاح API غير متوفر"}
     model = genai.GenerativeModel('gemini-2.0-flash')
     
-    ddg = _search_ddg(f"site:mahwous.com {product_name}")
-    web_ctx = "\n".join(r["snippet"][:100] for r in ddg)
-    
-    prompt = f"""هل العطر {product_name} متوفر في موقع mahwous.com بناءً على هذه النتائج؟
+    try:
+        ddg = _search_ddg(f"site:mahwous.com {product_name}")
+        web_ctx = "\n".join(r["snippet"][:100] for r in ddg)
+        
+        prompt = f"""هل العطر {product_name} متوفر في موقع mahwous.com بناءً على هذه النتائج؟
 {web_ctx}
 
 اجب بصيغة JSON: {{"likely_available": "نعم/لا/غير مؤكد", "reason": "سبب قصير بالعربية"}}"""
 
-    try:
         response = model.generate_content(prompt)
         data = _parse_json(response.text)
-        if data: return {"success": True, **data}
+        if data: 
+            return {"success": True, **data}
+        else:
+            return {"success": False, "message": "تعذر التحقق من المتجر."}
     except Exception as e:
-        print(f"Mahwous Search Error: {e}")
-    return {"success": False}
+        return {"success": False, "message": f"خطأ أثناء البحث في المتجر: {str(e)}"}
