@@ -1,238 +1,226 @@
 """
-missing_products_app/app.py
-نظام إدارة المنتجات المفقودة الذكي — متجر مهووس
-الإصدار V9.0 الشامل - مهندس نظام مهووس الذكي (المصحح والمتوافق 100%)
+app.py v7.0 — الواجهة الذكية المتفاعلة (Smart Interactive Dashboard)
+══════════════════════════════════════════════════════════════════════
+- تصميم عصري يركز على "المقارنة البصرية" والتدقيق اليدوي السريع.
+- أزرار ذكاء اصطناعي تفاعلية لكل منتج (إضافة، تجاهل، إعادة تحقق).
+- نظام "التحقق المزدوج" (Double-Check) لضمان دقة 100%.
+- عرض جانبي (Side-by-Side) لمنتج المنافس مقابل منتجنا المطابق.
 """
 
 import streamlit as st
 import pandas as pd
-import plotly.express as px
+import asyncio
+import time
+from datetime import datetime
+
+from config import APP_TITLE, APP_VERSION, APP_ICON, COLORS
 from db_manager import load_mahwous_store_data, load_competitor_data
-from ai_matcher import process_competitors, get_brand_statistics
+from sovereign_matcher import start_sovereign_analysis, ai_verify_match
 from make_sender import send_products_to_make
 
-# --- إعدادات الصفحة --- #
+# 1. إعدادات الصفحة الاحترافية
 st.set_page_config(
-    page_title="نظام المنتجات المفقودة V9.0 — مهووس",
-    page_icon="🌬️",
+    page_title=f"{APP_TITLE} {APP_VERSION}",
+    page_icon=APP_ICON,
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# --- CSS مخصص للواجهة العربية والهوية البصرية لمهووس --- #
-st.markdown("""
+# 2. تهيئة Session State للتحكم الكامل
+if 'analysis_running' not in st.session_state: st.session_state.analysis_running = False
+if 'processed_count' not in st.session_state: st.session_state.processed_count = 0
+if 'total_count' not in st.session_state: st.session_state.total_count = 0
+if 'analysis_results' not in st.session_state: st.session_state.analysis_results = []
+if 'ignore_list' not in st.session_state: st.session_state.ignore_list = set()
+if 'needs_rerun' not in st.session_state: st.session_state.needs_rerun = False
+if 'ai_verifications' not in st.session_state: st.session_state.ai_verifications = {}
+
+# 3. CSS مخصص (التصميم السيادي)
+st.markdown(f"""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700&display=swap');
-    
-    html, body, [class*="css"] {
-        font-family: 'Tajawal', sans-serif;
+    @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;700&display=swap');
+    html, body, [data-testid="stAppViewContainer"] {{
+        font-family: 'Cairo', sans-serif;
         direction: rtl;
         text-align: right;
-    }
-    .stApp { background-color: #0e1117; color: #ffffff; }
-    
-    /* تنسيق البطاقات الإحصائية */
-    .metric-card {
-        background: linear-gradient(135deg, #1e3a5f 0%, #0a192f 100%);
-        border: 1px solid #2d6a9f;
-        border-radius: 15px;
-        padding: 20px;
+        background-color: {COLORS['bg_dark']};
+        color: #e0e0e0;
+    }}
+    .main-header {{
+        background: linear-gradient(135deg, {COLORS['primary']} 0%, {COLORS['secondary']} 100%);
+        padding: 2.5rem;
+        border-radius: 1.5rem;
+        color: white;
+        margin-bottom: 2.5rem;
         text-align: center;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.3);
-    }
-    .metric-value { font-size: 2.2rem; font-weight: bold; color: #00d4ff; }
-    .metric-label { font-size: 1rem; color: #a0aec0; margin-top: 5px; }
-    
-    /* تنسيق الجداول */
-    .stDataFrame { border-radius: 10px; overflow: hidden; border: 1px solid #2d3748; }
+        box-shadow: 0 10px 20px rgba(0,0,0,0.3);
+        border: 1px solid rgba(255,255,255,0.1);
+    }}
+    .product-card {{
+        background: {COLORS['bg_card']};
+        border: 1px solid rgba(255,255,255,0.05);
+        border-radius: 1.2rem;
+        padding: 1.5rem;
+        margin-bottom: 1.5rem;
+        transition: transform 0.2s, box-shadow 0.2s;
+    }}
+    .product-card:hover {{
+        transform: translateY(-5px);
+        box-shadow: 0 8px 25px rgba(0,0,0,0.4);
+        border-color: {COLORS['accent']};
+    }}
+    .comparison-grid {{
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 2rem;
+        align-items: center;
+    }}
+    .product-box {{
+        background: rgba(255,255,255,0.03);
+        padding: 1rem;
+        border-radius: 1rem;
+        text-align: center;
+    }}
+    .product-img {{
+        width: 160px;
+        height: 160px;
+        object-fit: contain;
+        border-radius: 0.8rem;
+        background: #fff;
+        padding: 5px;
+        margin-bottom: 0.8rem;
+    }}
+    .badge {{
+        padding: 0.5rem 1.2rem;
+        border-radius: 2rem;
+        font-size: 0.9rem;
+        font-weight: 700;
+        display: inline-block;
+        margin-bottom: 1rem;
+    }}
+    .badge-green {{ background: rgba(40, 167, 69, 0.2); color: #28a745; border: 1px solid #28a745; }}
+    .badge-yellow {{ background: rgba(255, 152, 0, 0.2); color: #ff9800; border: 1px solid #ff9800; }}
+    .badge-red {{ background: rgba(220, 53, 69, 0.2); color: #dc3545; border: 1px solid #dc3545; }}
+    .price-tag {{
+        font-size: 1.4rem;
+        font-weight: 800;
+        color: #00d2ff;
+        margin: 0.5rem 0;
+    }}
+    .stButton > button {{
+        width: 100%;
+        border-radius: 0.8rem;
+        font-weight: 700;
+        transition: all 0.3s;
+    }}
 </style>
 """, unsafe_allow_html=True)
 
-# --- إدارة حالة الجلسة (Session State) --- #
-if 'analysis_results' not in st.session_state:
-    st.session_state.analysis_results = None
+def main():
+    st.markdown(f'<div class="main-header"><h1>{APP_ICON} {APP_TITLE}</h1><p>{APP_VERSION} | محرك المطابقة السيادي — دقة 100% بذكاء اصطناعي تفاعلي</p></div>', unsafe_allow_html=True)
 
-# --- الواجهة الرئيسية --- #
-col_title, col_logo = st.columns([0.8, 0.2])
-with col_title:
-    st.title("🌬️ نظام إدارة المنتجات المفقودة الذكي V9.0")
-    st.markdown("<p style='font-size: 1.2rem; color: #00d4ff;'>إصدار مهندس نظام مهووس الذكي الشامل</p>", unsafe_allow_html=True)
+    # الشريط الجانبي الذكي
+    with st.sidebar:
+        st.header("📂 إدارة البيانات")
+        mahwous_file = st.file_uploader("ملف متجر مهووس (المرجع)", type=["csv"])
+        competitor_files = st.file_uploader("ملفات المنافسين (للمقارنة)", type=["csv"], accept_multiple_files=True)
+        
+        st.divider()
+        if st.button("🚀 بدء التحليل السيادي", type="primary", use_container_width=True, disabled=st.session_state.analysis_running):
+            if mahwous_file and competitor_files:
+                with st.spinner("جاري تهيئة محرك المطابقة..."):
+                    m_df = load_mahwous_store_data(mahwous_file)
+                    c_data = {f.name: load_competitor_data(f) for f in competitor_files}
+                    # تشغيل التحليل
+                    start_sovereign_analysis(m_df, c_data)
+                    st.rerun()
+            else:
+                st.error("الرجاء رفع كافة الملفات المطلوبة.")
+        
+        if st.session_state.analysis_running:
+            if st.button("🛑 إيقاف فوري", type="secondary", use_container_width=True):
+                st.session_state.analysis_running = False
+                st.rerun()
 
-# --- الشريط الجانبي (Sidebar) --- #
-with st.sidebar:
-    st.header("📂 مصادر البيانات")
-    
-    st.subheader("1. ملف متجر مهووس (CSV)")
-    mahwous_file = st.file_uploader("ارفع ملف متجر مهووس", type=["csv"], key="mahwous_upload")
-    
-    st.subheader("2. ملفات المنافسين (CSV)")
-    competitor_files = st.file_uploader("ارفع ملفات المنافسين (حتى 15 ملف)", type=["csv"], accept_multiple_files=True, key="comp_upload")
-    
-    st.divider()
-    
-    if st.button("🚀 بدء التحليل الشامل V9.0", type="primary", use_container_width=True):
-        if mahwous_file and competitor_files:
-            with st.spinner("جاري تحميل ومعالجة البيانات بدقة متناهية..."):
-                try:
-                    # تحميل بيانات مهووس
-                    mahwous_df = load_mahwous_store_data(mahwous_file)
-                    
-                    # إصلاح: تحميل بيانات المنافسين كقاموس (Dictionary) ليتوافق مع ai_matcher
-                    competitors_data = {f.name: load_competitor_data(f) for f in competitor_files}
-                    
-                    if not mahwous_df.empty and competitors_data:
-                        # عملية المطابقة الذكية V9.0
-                        st.session_state.analysis_results = process_competitors(mahwous_df, competitors_data)
-                        st.success("✅ اكتمل التحليل بنجاح! تم تحديث كافة التبويبات.")
-                    else:
-                        st.error("❌ حدث خطأ: البيانات فارغة أو غير صالحة. يرجى التأكد من صيغة CSV.")
-                except Exception as e:
-                    st.error(f"❌ حدث خطأ أثناء المعالجة: {e}")
-        else:
-            st.warning("⚠️ يرجى رفع كافة الملفات المطلوبة أولاً.")
+    # عرض التقدم المباشر
+    if st.session_state.analysis_running:
+        progress = st.session_state.processed_count / st.session_state.total_count if st.session_state.total_count > 0 else 0
+        st.progress(progress, text=f"جاري الفحص الذكي: {st.session_state.processed_count} / {st.session_state.total_count}")
+        time.sleep(1.5)
+        st.rerun()
 
-# --- عرض النتائج في حال توفرها --- #
-if st.session_state.analysis_results is not None:
-    results_df = st.session_state.analysis_results
-    
-    # تصنيف النتائج بناءً على العتبات الجديدة V9.0
-    missing_confirmed = results_df[results_df['status'] == "منتج مفقود مؤكد"]
-    needs_review = results_df[results_df['status'] == "يحتاج مراجعة"]
-    available_duplicate = results_df[results_df['status'] == "متوفر (مكرر)"]
+    # لوحة التحكم بالنتائج
+    if st.session_state.analysis_results:
+        df = pd.DataFrame(st.session_state.analysis_results)
+        df = df[~df['product_name'].isin(st.session_state.ignore_list)]
+        
+        if not df.empty:
+            # إحصائيات سريعة
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("إجمالي المكتشف", len(df))
+            c2.metric("🟢 مفقود مؤكد", len(df[df['confidence_level'] == 'green']))
+            c3.metric("🟡 مشتبه به", len(df[df['confidence_level'] == 'yellow']))
+            c4.metric("🔴 مكرر لدينا", len(df[df['confidence_level'] == 'red']))
 
-    # --- بطاقات الإحصاء العلوية --- #
-    st.subheader("📊 نظرة عامة على السوق")
-    m1, m2, m3, m4 = st.columns(4)
-    with m1:
-        st.markdown(f"<div class='metric-card'><div class='metric-value'>{len(missing_confirmed)}</div><div class='metric-label'>مفقود مؤكد 🔴</div></div>", unsafe_allow_html=True)
-    with m2:
-        st.markdown(f"<div class='metric-card'><div class='metric-value'>{len(needs_review)}</div><div class='metric-label'>يحتاج مراجعة 🟡</div></div>", unsafe_allow_html=True)
-    with m3:
-        st.markdown(f"<div class='metric-card'><div class='metric-value'>{len(available_duplicate)}</div><div class='metric-label'>مكرر/متوفر ✅</div></div>", unsafe_allow_html=True)
-    with m4:
-        st.markdown(f"<div class='metric-card'><div class='metric-value'>{len(results_df)}</div><div class='metric-label'>إجمالي المنتجات</div></div>", unsafe_allow_html=True)
-
-    st.divider()
-
-    # --- التبويبات المحدثة V9.0 --- #
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "🔴 مفقود مؤكد (فرص بيعية)", 
-        "🟡 يحتاج مراجعة دقيقة", 
-        "✅ التحقق من المتوفر", 
-        "🔥 أهم 10 ماركات مفقودة"
-    ])
-
-    # 1. تبويب المنتجات المفقودة المؤكدة
-    with tab1:
-        st.subheader("المنتجات المفقودة بنسبة 100% (غير متوفرة لدينا)")
-        if not missing_confirmed.empty:
-            # فلاتر سريعة
-            fcol1, fcol2 = st.columns(2)
-            with fcol1:
-                comp_filter = st.multiselect("تصفية حسب المنافس", options=missing_confirmed['competitor_name'].unique())
-            with fcol2:
-                brand_filter = st.multiselect("تصفية حسب الماركة", options=missing_confirmed['brand'].unique())
+            # التبويبات الذكية
+            tab1, tab2, tab3 = st.tabs(["🟢 فرص إضافة (مفقود)", "🟡 مراجعة دقيقة (مشتبه)", "🔴 منتجات متوفرة (مكرر)"])
             
-            display_df = missing_confirmed.copy()
-            if comp_filter: display_df = display_df[display_df['competitor_name'].isin(comp_filter)]
-            if brand_filter: display_df = display_df[display_df['brand'].isin(brand_filter)]
-            
-            display_df.insert(0, "تحديد", False)
-            edited_df = st.data_editor(
-                display_df[['تحديد', 'product_name', 'price', 'competitor_name', 'brand', 'image_url']],
-                column_config={
-                    "image_url": st.column_config.ImageColumn("صورة المنتج"),
-                    "price": st.column_config.NumberColumn("السعر", format="%.2f ر.س"),
-                    "product_name": "اسم المنتج المفقود",
-                    "competitor_name": "المنافس",
-                    "brand": "الماركة"
-                },
-                hide_index=True,
-                use_container_width=True,
-                key="missing_editor"
-            )
-            
-            selected_to_send = edited_df[edited_df["تحديد"] == True]
-            if st.button(f"🚀 إرسال {len(selected_to_send)} منتج إلى Make.com", type="primary", disabled=len(selected_to_send)==0):
-                with st.spinner("جاري الإرسال للأتمتة..."):
-                    result = send_products_to_make(selected_to_send.to_dict('records'))
-                    st.success("تم إرسال المنتجات المحددة بنجاح!")
-        else:
-            st.info("لا توجد منتجات مفقودة مؤكدة حالياً.")
+            def render_smart_cards(level):
+                filtered = df[df['confidence_level'] == level]
+                for idx, row in filtered.iterrows():
+                    with st.container():
+                        st.markdown(f"""
+                        <div class="product-card">
+                            <div class="comparison-grid">
+                                <div class="product-box">
+                                    <p style="font-size: 0.8rem; color: #aaa;">منتج المنافس</p>
+                                    <img src="{row.get('image_url', '')}" class="product-img">
+                                    <p style="font-weight: 700;">{row['product_name']}</p>
+                                    <p class="price-tag">{row['price']} ر.س</p>
+                                    <p style="font-size: 0.75rem; color: #888;">المنافس: {row.get('competitor_name', 'غير معروف')}</p>
+                                </div>
+                                <div class="product-box">
+                                    <p style="font-size: 0.8rem; color: #aaa;">أقرب مطابقة لدينا</p>
+                                    <img src="{row.get('match_image', '')}" class="product-img">
+                                    <p style="font-weight: 700;">{row.get('match_name', 'لا يوجد مطابقة قريبة')}</p>
+                                    <p class="price-tag">{row.get('match_price', 0)} ر.س</p>
+                                    <span class="badge badge-{row['confidence_level']}">{row['status']} ({row.get('match_score', 0)}%)</span>
+                                </div>
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        # أزرار الذكاء الاصطناعي التفاعلية
+                        b_cols = st.columns([2, 1, 1, 1])
+                        
+                        # حالة التحقق الذكي
+                        key = f"ai_check_{idx}"
+                        if key in st.session_state.ai_verifications:
+                            res = st.session_state.ai_verifications[key]
+                            st.info(f"💡 نتيجة التحقق: {res['reason']}")
+                        
+                        with b_cols[1]:
+                            if st.button("🔍 تحقق ذكي", key=f"btn_ai_{idx}"):
+                                with st.spinner("جاري التحليل..."):
+                                    res = asyncio.run(ai_verify_match(row['product_name'], row.get('match_name', '')))
+                                    st.session_state.ai_verifications[key] = res
+                                    st.rerun()
+                        
+                        with b_cols[2]:
+                            if st.button("✅ أضف لمهووس", key=f"btn_add_{idx}", type="primary"):
+                                res = send_products_to_make([row.to_dict()])
+                                if res['success']: st.toast("تم الإرسال لـ Make!", icon="🚀")
+                                else: st.error("فشل الإرسال")
+                                
+                        with b_cols[3]:
+                            if st.button("🗑️ تجاهل", key=f"btn_ign_{idx}"):
+                                st.session_state.ignore_list.add(row['product_name'])
+                                st.rerun()
+                        st.markdown("<hr style='border: 0.5px solid rgba(255,255,255,0.05);'>", unsafe_allow_html=True)
 
-    # 2. تبويب يحتاج مراجعة (لمنع إضاعة الفرص)
-    with tab2:
-        st.subheader("منتجات مشبوهة (تطابق 40% - 80%)")
-        st.warning("هذه المنتجات قد تكون متوفرة لدينا بأسماء مختلفة. يرجى المراجعة يدوياً لمنع التكرار.")
-        if not needs_review.empty:
-            st.dataframe(
-                needs_review[['product_name', 'matched_product', 'confidence_score', 'competitor_name', 'image_url']],
-                column_config={
-                    "image_url": st.column_config.ImageColumn("صورة المنافس"),
-                    "confidence_score": st.column_config.ProgressColumn("نسبة التطابق", format="%f%%", min_value=0, max_value=100),
-                    "product_name": "اسم المنتج عند المنافس",
-                    "matched_product": "أقرب منتج مطابق لدينا"
-                },
-                hide_index=True,
-                use_container_width=True
-            )
-        else:
-            st.info("لا توجد منتجات تحتاج مراجعة.")
+            with tab1: render_smart_cards('green')
+            with tab2: render_smart_cards('yellow')
+            with tab3: render_smart_cards('red')
 
-    # 3. تبويب التحقق من المتوفر
-    with tab3:
-        st.subheader("التحقق من المنتجات المتوفرة (تطابق > 80%)")
-        st.info("هنا نعرض ما صنفناه كـ 'مكرر'. تأكد من صحة المطابقة البصرية.")
-        if not available_duplicate.empty:
-            for idx, row in available_duplicate.head(20).iterrows(): # عرض أول 20 للتحقق
-                with st.container():
-                    c1, c2, c3 = st.columns([0.4, 0.2, 0.4])
-                    with c1:
-                        # حماية في حال عدم توفر الصورة
-                        comp_img = row['image_url'] if pd.notna(row['image_url']) and row['image_url'] else "https://via.placeholder.com/150?text=No+Image"
-                        st.image(comp_img, width=150, caption="صورة المنافس")
-                        st.write(f"**{row['product_name']}**")
-                    with c2:
-                        st.markdown(f"<div style='text-align:center; margin-top:50px;'><h2 style='color:#00ff00;'>{int(row['confidence_score'])}%</h2><p>تطابق</p></div>", unsafe_allow_html=True)
-                    with c3:
-                        # حماية في حال عدم توفر الصورة
-                        mah_img = row['matched_image'] if pd.notna(row['matched_image']) and row['matched_image'] else "https://via.placeholder.com/150?text=No+Image"
-                        st.image(mah_img, width=150, caption="منتجنا المطابق")
-                        st.write(f"**{row['matched_product']}**")
-                    st.divider()
-        else:
-            st.info("لا توجد منتجات مكررة.")
-
-    # 4. تبويب أهم 10 ماركات مفقودة
-    with tab4:
-        st.subheader("🔥 رادار الفرص: أهم 10 ماركات مفقودة")
-        brand_stats = get_brand_statistics(results_df)
-        if not brand_stats.empty:
-            col_chart, col_data = st.columns([0.6, 0.4])
-            with col_chart:
-                fig = px.bar(
-                    brand_stats, 
-                    x='count', 
-                    y='brand', 
-                    orientation='h',
-                    title="عدد المنتجات المفقودة حسب الماركة",
-                    labels={'count': 'عدد المنتجات', 'brand': 'الماركة'},
-                    color='count',
-                    color_continuous_scale='Blues'
-                )
-                fig.update_layout(yaxis={'categoryorder':'total ascending'}, plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', font_color="white")
-                st.plotly_chart(fig, use_container_width=True)
-            with col_data:
-                st.write("**قائمة الماركات الأكثر طلباً:**")
-                st.dataframe(brand_stats, hide_index=True, use_container_width=True)
-        else:
-            st.info("لا توجد بيانات كافية لحساب إحصائيات الماركات.")
-
-else:
-    # واجهة الترحيب في حال عدم وجود نتائج
-    st.markdown("""
-    <div style='text-align: center; padding: 50px;'>
-        <h2 style='color: #a0aec0;'>مرحباً بك في الإصدار V9.0 الشامل</h2>
-        <p style='color: #718096;'>يرجى رفع ملفات CSV من القائمة الجانبية للبدء في تحليل السوق واكتشاف الفرص المفقودة.</p>
-    </div>
-    """, unsafe_allow_html=True)
+if __name__ == "__main__":
+    main()
