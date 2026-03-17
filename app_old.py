@@ -1,10 +1,10 @@
 """
-app.py v14.6 — الواجهة الشاملة (استعادة كافة الميزات + النظام الهجين)
+app.py v14.0 — الواجهة الذكية المتفاعلة (دعم سحب الصور المتعددة والوصف المطول لمهووس)
 ══════════════════════════════════════════════════════════════════════
-- استعادة شريط التقدم اللحظي والفلاتر المتقدمة (المنافس، الماركة).
-- استعادة التقسيمات الثلاثة (مفقود 🟢، مراجعة 🟡، متطابق 🔴).
-- دمج النظام الهجين: سحب الصور برمجياً + توليد الوصف (AI/Smart Template) مع روابط داخلية.
-- حماية الأزرار والتقاط الأخطاء مع ضمان عدم حذف أي كود أصلي.
+- تقسيم الأقسام بنسب تأكد واضحة (مفقود 95-100%، مراجعة 80-95%، متطابق 90-100%).
+- سحب جميع صور المنتج المتوفرة وتوليد الوصف بأسلوب مهووس المطور تلقائياً قبل الإرسال.
+- دعم إرسال الصور المتعددة لسيناريو Make لضمان ظهورها في سلة.
+- حماية الأزرار والتقاط الأخطاء مع شريط تقدم لحظي.
 """
 
 import streamlit as st
@@ -18,7 +18,7 @@ from db_manager import load_mahwous_store_data, load_competitor_data
 from sovereign_matcher import start_sovereign_analysis, ai_verify_match
 from make_sender import send_products_to_make
 
-# استيراد أدوات الذكاء الاصطناعي والنظام الهجين
+# استيراد أدوات الذكاء الاصطناعي
 from ai_engine import (
     fetch_product_images, 
     fetch_fragrantica_info, 
@@ -30,7 +30,7 @@ from ai_engine import (
 # 1. إعدادات الصفحة
 st.set_page_config(page_title=f"{APP_TITLE} {APP_VERSION}", page_icon=APP_ICON, layout="wide")
 
-# 2. تهيئة Session State (استعادة كافة الحالات السابقة)
+# 2. تهيئة Session State
 if 'analysis_running' not in st.session_state: st.session_state.analysis_running = False
 if 'processed_count' not in st.session_state: st.session_state.processed_count = 0
 if 'total_count' not in st.session_state: st.session_state.total_count = 0
@@ -69,38 +69,38 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 def prepare_product_for_sending(row):
-    """تجهيز المنتج بالنظام الهجين: سحب الصور برمجياً + توليد الوصف المطور لمهووس"""
+    """تجهيز المنتج بالوصف المطور وجميع الصور المتاحة"""
     p_name = row['product_name']
     p_price = row['price']
     p_dict = row.to_dict()
     
-    # 1. جلب المكونات الحقيقية (AI/برمجي)
+    # 1. جلب معلومات إضافية للهرم العطري لتحسين الوصف
     frag_res = fetch_fragrantica_info(p_name)
     
-    # 2. توليد الوصف (النظام الهجين: AI أو قوالب ذكية مع روابط داخلية)
+    # 2. توليد الوصف المطور (خبير وصف منتجات مهووس)
     p_dict['description'] = generate_mahwous_description(p_name, p_price, frag_res if frag_res['success'] else None)
     
-    # 3. سحب الصور وإصلاح روابطها برمجياً (Python)
+    # 3. سحب جميع الصور المتاحة
     img_res = fetch_product_images(p_name)
     if img_res['success'] and img_res['images']:
         p_dict['image_url'] = img_res['images'][0]['url']
         p_dict['all_images'] = [img['url'] for img in img_res['images']]
     else:
-        # استخدام صورة المنافس كبديل طوارئ
+        # استخدام صورة المنافس إذا فشل سحب صور جديدة
         p_dict['all_images'] = [row.get('image_url')] if row.get('image_url') else []
         
     return p_dict
 
 def main():
-    st.title(f"{APP_ICON} {APP_TITLE} (النسخة 14.6)")
-    st.markdown("محرك المطابقة السيادي وخبير المنتجات المفقودة - النسخة الشاملة")
+    st.title(f"{APP_ICON} {APP_TITLE} (النسخة 14.0)")
+    st.markdown("محرك المطابقة السيادي وخبير المنتجات المفقودة")
 
     with st.sidebar:
         st.header("📂 رفع البيانات")
         mahwous_file = st.file_uploader("ملف متجر مهووس (المرجع)", type=["csv"])
         competitor_files = st.file_uploader("ملفات المنافسين", type=["csv"], accept_multiple_files=True)
         
-        if st.button("🚀 بدء التحليل", key="start_btn", type="primary", use_container_width=True, disabled=st.session_state.analysis_running):
+        if st.button("🚀 بدء التحليل", type="primary", use_container_width=True, disabled=st.session_state.analysis_running):
             if mahwous_file and competitor_files:
                 try:
                     st.session_state.analysis_running = True
@@ -119,11 +119,10 @@ def main():
                 st.error("الرجاء رفع الملفات أولاً.")
         
         if st.session_state.analysis_running:
-            if st.button("🛑 إيقاف فوري", key="stop_btn", use_container_width=True):
+            if st.button("🛑 إيقاف فوري", use_container_width=True):
                 st.session_state.analysis_running = False
                 st.rerun()
 
-    # استعادة شريط التقدم اللحظي
     if st.session_state.analysis_running:
         progress_placeholder = st.empty()
         status_placeholder = st.empty()
@@ -152,7 +151,6 @@ def main():
             st.info("لا توجد بيانات لعرضها.")
             return
 
-        # استعادة الـ Metrics
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("إجمالي المنتجات", len(df))
         c2.metric("🟢 مفقود أكيد", len(df[df['confidence_level'] == 'green']))
@@ -177,7 +175,7 @@ def main():
 
         ITEMS_PER_PAGE = 25
 
-        # 🟢 القسم الأخضر (استعادة الفلاتر والتقسيم)
+        # 🟢 القسم الأخضر
         with tab_green:
             df_g = df[df['confidence_level'] == 'green']
             cg1, cg2, cg3 = st.columns(3)
@@ -193,17 +191,21 @@ def main():
                 total_pages_g = math.ceil(len(df_g) / ITEMS_PER_PAGE)
                 if st.session_state.page_green > total_pages_g: st.session_state.page_green = total_pages_g
                 
-                col_bulk1, col_pg1, col_pg2, col_pg3 = st.columns([2, 1, 2, 1])
+                col_bulk1, col_bulk2, col_pg1, col_pg2, col_pg3 = st.columns([2, 2, 1, 2, 1])
                 with col_bulk1:
                     if st.button("🚀 إرسال المحدد لـ Make", key="bulk_g", type="primary"):
-                        selected = [row for _, row in df_g.iterrows() if row['product_name'] in st.session_state.selected_green]
-                        if selected:
-                            with st.spinner("جاري التجهيز والإرسال بالنظام الهجين..."):
-                                payloads = [prepare_product_for_sending(row) for row in selected]
-                                res = send_products_to_make(payloads)
-                                if res['success']: st.success(res['message'])
-                                else: st.error(res['message'])
-                        else: st.warning("الرجاء تحديد منتج واحد على الأقل.")
+                        try:
+                            selected = [row for _, row in df_g.iterrows() if row['product_name'] in st.session_state.selected_green]
+                            if selected:
+                                with st.spinner("جاري توليد الوصف وسحب الصور والإرسال..."):
+                                    payloads = []
+                                    for row in selected:
+                                        payloads.append(prepare_product_for_sending(row))
+                                    res = send_products_to_make(payloads)
+                                    if res['success']: st.success(res['message'])
+                                    else: st.error(res['message'])
+                            else: st.warning("الرجاء تحديد منتج واحد على الأقل.")
+                        except Exception as e: st.error(f"❌ خطأ أثناء الإرسال الجماعي: {e}")
                 
                 with col_pg1: st.button("⬅️ السابق", key="pg_prev_g", on_click=prev_page, args=("page_green",), disabled=(st.session_state.page_green == 1))
                 with col_pg2: st.markdown(f"<div style='text-align:center; padding-top:10px;'>صفحة {st.session_state.page_green} من {total_pages_g}</div>", unsafe_allow_html=True)
@@ -231,22 +233,36 @@ def main():
                             
                             b_cols = st.columns(6)
                             if b_cols[0].button("🖼️ بحث صور", key=f"img_g_{idx}"):
-                                with st.spinner(".."):
-                                    res = fetch_product_images(p_name)
-                                    if res['success']: st.markdown(render_image(res['images'][0]['url'], 100), unsafe_allow_html=True)
+                                try:
+                                    with st.spinner(".."):
+                                        res = fetch_product_images(p_name)
+                                        if res['success'] and res['images']: 
+                                            for img in res['images'][:2]: st.markdown(render_image(img['url'], 100), unsafe_allow_html=True)
+                                        else: st.warning("لم يتم العثور.")
+                                except Exception as e: st.error(f"خطأ: {e}")
+                            
+                            if b_cols[1].button("🌸 مكونات", key=f"not_g_{idx}"):
+                                try:
+                                    with st.spinner(".."):
+                                        res = fetch_fragrantica_info(p_name)
+                                        if res['success']: st.info(f"القمة: {', '.join(res.get('top_notes', []))}")
+                                        else: st.warning("لم يتم العثور.")
+                                except Exception as e: st.error(f"خطأ: {e}")
                             
                             if b_cols[4].button("📤 إرسال مفرد", key=f"snd_g_{idx}", type="primary"):
-                                with st.spinner("جاري التجهيز..."):
-                                    p_payload = prepare_product_for_sending(row)
-                                    res = send_products_to_make([p_payload])
-                                    if res['success']: st.toast("تم الإرسال!", icon="✅")
-                                    else: st.error(res['message'])
+                                try:
+                                    with st.spinner("يولد الوصف ويسحب الصور..."):
+                                        p_payload = prepare_product_for_sending(row)
+                                        res = send_products_to_make([p_payload])
+                                        if res['success']: st.toast("تم الإرسال!", icon="✅")
+                                        else: st.error(res['message'])
+                                except Exception as e: st.error(f"خطأ: {e}")
                             
                             if b_cols[5].button("🗑️ تجاهل", key=f"ign_g_{idx}"):
                                 st.session_state.ignore_list.add(p_name)
                                 st.rerun()
 
-        # 🟡 القسم الأصفر (استعادة المقارنة الثنائية)
+        # 🟡 القسم الأصفر
         with tab_yellow:
             df_y = df[df['confidence_level'] == 'yellow']
             cy1, cy2, cy3 = st.columns(3)
@@ -261,17 +277,19 @@ def main():
             if not df_y.empty:
                 total_pages_y = math.ceil(len(df_y) / ITEMS_PER_PAGE)
                 if st.session_state.page_yellow > total_pages_y: st.session_state.page_yellow = total_pages_y
-                
-                col_bulk_y, col_py1, col_py2, col_py3 = st.columns([2, 1, 2, 1])
+                col_bulk_y, col_space, col_py1, col_py2, col_py3 = st.columns([2, 2, 1, 2, 1])
                 with col_bulk_y:
                     if st.button("🚀 إرسال المحدد لـ Make", key="bulk_y", type="primary"):
-                        selected = [row for _, row in df_y.iterrows() if row['product_name'] in st.session_state.selected_yellow]
-                        if selected:
-                            with st.spinner("جاري الإرسال..."):
-                                payloads = [prepare_product_for_sending(row) for row in selected]
-                                res = send_products_to_make(payloads)
-                                if res['success']: st.success(res['message'])
-                                else: st.error(res['message'])
+                        try:
+                            selected = [row for _, row in df_y.iterrows() if row['product_name'] in st.session_state.selected_yellow]
+                            if selected:
+                                with st.spinner("جاري الإرسال وتوليد الوصف..."):
+                                    payloads = [prepare_product_for_sending(row) for row in selected]
+                                    res = send_products_to_make(payloads)
+                                    if res['success']: st.success(res['message'])
+                                    else: st.error(res['message'])
+                            else: st.warning("حدد منتجاً أولاً.")
+                        except Exception as e: st.error(f"❌ خطأ: {e}")
 
                 with col_py1: st.button("⬅️ السابق", key="py_prev_y", on_click=prev_page, args=("page_yellow",), disabled=(st.session_state.page_yellow == 1))
                 with col_py2: st.markdown(f"<div style='text-align:center; padding-top:10px;'>صفحة {st.session_state.page_yellow} من {total_pages_y}</div>", unsafe_allow_html=True)
@@ -304,13 +322,15 @@ def main():
                             elif p_name in st.session_state.selected_yellow: st.session_state.selected_yellow.remove(p_name)
                         
                         if b_cols[3].button("📤 إرسال لـ Make", key=f"btn_snd_y_{idx}", type="primary"):
-                            with st.spinner("جاري التجهيز..."):
-                                p_payload = prepare_product_for_sending(row)
-                                res = send_products_to_make([p_payload])
-                                if res['success']: st.toast("تم الإرسال!", icon="✅")
-                                else: st.error(res['message'])
+                            try:
+                                with st.spinner("يولد الوصف ويسحب الصور..."):
+                                    p_payload = prepare_product_for_sending(row)
+                                    res = send_products_to_make([p_payload])
+                                    if res['success']: st.toast("تم الإرسال!", icon="✅")
+                                    else: st.error(res['message'])
+                            except Exception as e: st.error(f"خطأ: {e}")
 
-        # 🔴 القسم الأحمر (استعادة المنتجات المتطابقة)
+        # 🔴 القسم الأحمر
         with tab_red:
             df_r = df[df['confidence_level'] == 'red']
             if not df_r.empty:
