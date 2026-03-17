@@ -1,10 +1,11 @@
 """
-app.py v12.0 — الواجهة الذكية المتفاعلة (نظام الصفحات، التقاط الأخطاء، وحماية الصور)
+app.py v13.0 — الواجهة الذكية المتفاعلة (بطاقات منظمة، فلاتر شاملة، ونسب دقيقة)
 ══════════════════════════════════════════════════════════════════════
-- جميع ميزات V10 محفوظة (فلاتر، تحديد جماعي، توليد وصف، أزرار AI مفردة).
-- تم إضافة نظام الصفحات (25 منتج/صفحة) لمنع التعليق.
-- تم إضافة نظام حماية الصور (يستبدل الصورة المقفلة أو المكسورة تلقائياً).
-- تم تغليف جميع الأزرار بنظام التقاط الأخطاء لمعرفة سبب أي عطل.
+- تقسيم الأقسام بنسب تأكد واضحة (مفقود 95-100%، مراجعة 80-95%، متطابق 90-100%).
+- فلاتر شاملة (بحث، منافس، ماركة) لكل قسم.
+- سحب الصور المفقودة وتوليد الوصف بأسلوب مهووس تلقائياً قبل الإرسال.
+- عرض أنيق للمنتجات المتوفرة لدى أكثر من منافس في بطاقة واحدة.
+- حماية الأزرار والتقاط الأخطاء.
 """
 
 import streamlit as st
@@ -53,7 +54,7 @@ def next_page(key): st.session_state[key] += 1
 def prev_page(key): st.session_state[key] -= 1
 
 def render_image(url, width=150):
-    """حماية وعرض الصور: إذا كان الرابط تالفاً يعرض صورة بديلة بدل الخطأ"""
+    """حماية وعرض الصور: إذا كان الرابط تالفاً يعرض صورة بديلة"""
     if pd.isna(url) or not url:
         url = "https://via.placeholder.com/150?text=No+Image"
     return f'<img src="{url}" onerror="this.onerror=null;this.src=\'https://via.placeholder.com/150?text=Image+Locked\';" style="width:100%; max-width:{width}px; border-radius:8px; object-fit:contain; border: 1px solid #2d3748;">'
@@ -68,11 +69,12 @@ st.markdown("""
     .match-score { font-size: 1.1rem; font-weight: 800; padding: 5px 10px; border-radius: 5px; }
     .score-yellow { color: #ffc107; background: rgba(255, 193, 7, 0.1); }
     .score-red { color: #dc3545; background: rgba(220, 53, 69, 0.1); }
+    .competitor-tag { background: #2d3748; color: #e2e8f0; padding: 3px 8px; border-radius: 4px; font-size: 0.9rem; margin-left: 5px; display: inline-block;}
 </style>
 """, unsafe_allow_html=True)
 
 def main():
-    st.title(f"{APP_ICON} {APP_TITLE} (النسخة 12.0 - المتكاملة)")
+    st.title(f"{APP_ICON} {APP_TITLE} (النسخة 13.0)")
     st.markdown("محرك المطابقة السيادي وخبير المنتجات المفقودة")
 
     # ─── الشريط الجانبي (إدارة البيانات) ───
@@ -131,38 +133,44 @@ def main():
         c3.metric("🟡 تتطلب مراجعة", len(df[df['confidence_level'] == 'yellow']))
         c4.metric("🔴 متطابقة", len(df[df['confidence_level'] == 'red']))
 
-        # تقسيم التبويبات
+        # تقسيم التبويبات بالمسميات المطلوبة
         tab_green, tab_yellow, tab_red = st.tabs([
-            f"🟢 منتجات مفقودة ({len(df[df['confidence_level'] == 'green'])})", 
-            f"🟡 تتطلب مراجعة ({len(df[df['confidence_level'] == 'yellow'])})", 
-            f"🔴 منتجات متطابقة ({len(df[df['confidence_level'] == 'red'])})"
+            f"🟢 منتجات مفقودة (تأكد 95%-100%) ({len(df[df['confidence_level'] == 'green'])})", 
+            f"🟡 تتطلب مراجعة (شك 80%-95%) ({len(df[df['confidence_level'] == 'yellow'])})", 
+            f"🔴 منتجات متطابقة (تأكد 90%-100%) ({len(df[df['confidence_level'] == 'red'])})"
         ])
 
-        # دالة لاستخراج قائمة المنافسين لفلتر محدد
-        def get_competitors_list(df_part):
-            comps = []
-            for comp_str in df_part['competitor_name'].dropna():
-                comps.extend([c.strip() for c in str(comp_str).split('،')])
-            return ["الكل"] + list(set(comps))
+        # دالة لاستخراج قائمة القيم لفلتر محدد
+        def get_unique_list(df_part, column_name):
+            if column_name == 'competitor_name':
+                items = []
+                for comp_str in df_part[column_name].dropna():
+                    items.extend([c.strip() for c in str(comp_str).split('،')])
+                return ["الكل"] + sorted(list(set(items)))
+            else:
+                items = df_part[column_name].dropna().unique().tolist()
+                return ["الكل"] + sorted([str(i) for i in items if str(i).strip()])
 
         ITEMS_PER_PAGE = 25
 
         # =========================================================
-        # 🟢 القسم الأخضر: منتجات مفقودة (بدون مقارنة)
+        # 🟢 القسم الأخضر: منتجات مفقودة (لا توجد مقارنة بصرية)
         # =========================================================
         with tab_green:
             df_g = df[df['confidence_level'] == 'green']
             
-            # فلاتر القسم الأخضر
-            cg1, cg2 = st.columns(2)
-            with cg1: search_g = st.text_input("🔍 بحث في المفقودة...", key="search_g")
-            with cg2: comp_g = st.selectbox("🏬 فلترة المنافسين (المفقودة)", get_competitors_list(df_g), key="comp_g")
+            # فلاتر القسم الأخضر (بحث، منافس، ماركة)
+            cg1, cg2, cg3 = st.columns(3)
+            with cg1: search_g = st.text_input("🔍 بحث بالاسم...", key="search_g")
+            with cg2: comp_g = st.selectbox("🏬 فلترة المنافسين", get_unique_list(df_g, 'competitor_name'), key="comp_g")
+            with cg3: brand_g = st.selectbox("🏷️ فلترة الماركة", get_unique_list(df_g, 'brand'), key="brand_g")
             
             if search_g: df_g = df_g[df_g['product_name'].str.contains(search_g, case=False, na=False)]
             if comp_g != "الكل": df_g = df_g[df_g['competitor_name'].str.contains(comp_g, case=False, na=False)]
+            if brand_g != "الكل": df_g = df_g[df_g['brand'].astype(str) == brand_g]
 
             if not df_g.empty:
-                # نظام الصفحات للقسم الأخضر
+                # نظام الصفحات
                 total_pages_g = math.ceil(len(df_g) / ITEMS_PER_PAGE)
                 if st.session_state.page_green > total_pages_g: st.session_state.page_green = total_pages_g
                 
@@ -191,18 +199,15 @@ def main():
                         except Exception as e:
                             st.error(f"❌ خطأ أثناء الإرسال الجماعي: {e}")
                 
-                # أزرار التنقل للصفحات
                 with col_pg1: st.button("⬅️ السابق", key="pg_prev_g", on_click=prev_page, args=("page_green",), disabled=(st.session_state.page_green == 1))
                 with col_pg2: st.markdown(f"<div style='text-align:center; padding-top:10px;'>صفحة {st.session_state.page_green} من {total_pages_g}</div>", unsafe_allow_html=True)
                 with col_pg3: st.button("التالي ➡️", key="pg_next_g", on_click=next_page, args=("page_green",), disabled=(st.session_state.page_green == total_pages_g))
 
                 st.divider()
 
-                # استقطاع منتجات الصفحة الحالية
                 start_idx_g = (st.session_state.page_green - 1) * ITEMS_PER_PAGE
                 page_df_g = df_g.iloc[start_idx_g : start_idx_g + ITEMS_PER_PAGE]
 
-                # عرض بطاقات المنتجات
                 for idx, row in page_df_g.iterrows():
                     p_name = row['product_name']
                     p_price = row['price']
@@ -222,16 +227,22 @@ def main():
                         with c_info:
                             st.subheader(p_name)
                             st.markdown(f"<span class='price-text'>{p_price} ر.س</span>", unsafe_allow_html=True)
-                            st.write(f"🏢 **متوفر لدى:** {row.get('competitor_name')}")
                             
-                            # الأزرار الفردية مع التقاط الأخطاء
+                            # عرض المتاجر بشكل وسوم (Tags)
+                            comps = str(row.get('competitor_name', '')).split('،')
+                            comps_html = "".join([f"<span class='competitor-tag'>🏪 {c.strip()}</span>" for c in comps if c.strip()])
+                            st.markdown(f"**متوفر لدى:** {comps_html}", unsafe_allow_html=True)
+                            
+                            st.write(f"🏷️ **الماركة:** {row.get('brand', 'غير محدد')}")
+                            
+                            # الأزرار الفردية
                             b_cols = st.columns(6)
                             if b_cols[0].button("🖼️ بحث صور", key=f"img_g_{idx}"):
                                 try:
                                     with st.spinner(".."):
                                         res = fetch_product_images(p_name)
                                         if res['success'] and res['images']: st.markdown(render_image(res['images'][0]['url'], 100), unsafe_allow_html=True)
-                                        else: st.warning("لم يتم العثور على صور.")
+                                        else: st.warning("لم يتم العثور.")
                                 except Exception as e: st.error(f"خطأ: {e}")
                             
                             if b_cols[1].button("🌸 مكونات", key=f"not_g_{idx}"):
@@ -239,10 +250,10 @@ def main():
                                     with st.spinner(".."):
                                         res = fetch_fragrantica_info(p_name)
                                         if res['success']: st.info(f"القمة: {', '.join(res.get('top_notes', []))}")
-                                        else: st.warning("لم يتم العثور على مكونات.")
+                                        else: st.warning("لم يتم العثور.")
                                 except Exception as e: st.error(f"خطأ: {e}")
                             
-                            if b_cols[2].button("🔎 هل متوفر لدينا؟", key=f"chk_g_ai_{idx}"):
+                            if b_cols[2].button("🔎 هل متوفر؟", key=f"chk_g_ai_{idx}"):
                                 try:
                                     with st.spinner(".."):
                                         res = search_mahwous(p_name)
@@ -261,10 +272,14 @@ def main():
                                     with st.spinner("يولد الوصف ويرسل..."):
                                         p_dict = row.to_dict()
                                         p_dict['description'] = generate_mahwous_description(p_name, p_price)
+                                        if not p_dict.get('image_url'):
+                                            img_res = fetch_product_images(p_name)
+                                            if img_res['success'] and img_res['images']:
+                                                p_dict['image_url'] = img_res['images'][0]['url']
                                         res = send_products_to_make([p_dict])
                                         if res['success']: st.toast("تم الإرسال!", icon="✅")
                                         else: st.error(res['message'])
-                                except Exception as e: st.error(f"خطأ أثناء الإرسال: {e}")
+                                except Exception as e: st.error(f"خطأ: {e}")
                                 
                             if b_cols[5].button("🗑️ تجاهل", key=f"ign_g_{idx}"):
                                 st.session_state.ignore_list.add(p_name)
@@ -276,15 +291,16 @@ def main():
         with tab_yellow:
             df_y = df[df['confidence_level'] == 'yellow']
             
-            cy1, cy2 = st.columns(2)
-            with cy1: search_y = st.text_input("🔍 بحث في المراجعة...", key="search_y")
-            with cy2: comp_y = st.selectbox("🏬 فلترة المنافسين (المراجعة)", get_competitors_list(df_y), key="comp_y")
+            cy1, cy2, cy3 = st.columns(3)
+            with cy1: search_y = st.text_input("🔍 بحث بالمراجعة...", key="search_y")
+            with cy2: comp_y = st.selectbox("🏬 فلترة المنافسين", get_unique_list(df_y, 'competitor_name'), key="comp_y")
+            with cy3: brand_y = st.selectbox("🏷️ فلترة الماركة", get_unique_list(df_y, 'brand'), key="brand_y")
             
             if search_y: df_y = df_y[df_y['product_name'].str.contains(search_y, case=False, na=False)]
             if comp_y != "الكل": df_y = df_y[df_y['competitor_name'].str.contains(comp_y, case=False, na=False)]
+            if brand_y != "الكل": df_y = df_y[df_y['brand'].astype(str) == brand_y]
 
             if not df_y.empty:
-                # نظام الصفحات للقسم الأصفر
                 total_pages_y = math.ceil(len(df_y) / ITEMS_PER_PAGE)
                 if st.session_state.page_yellow > total_pages_y: st.session_state.page_yellow = total_pages_y
 
@@ -294,7 +310,7 @@ def main():
                         try:
                             selected = [row for _, row in df_y.iterrows() if row['product_name'] in st.session_state.selected_yellow]
                             if selected:
-                                with st.spinner("جاري الإرسال..."):
+                                with st.spinner("جاري الإرسال وتوليد الوصف..."):
                                     payloads = []
                                     for row in selected:
                                         p_dict = row.to_dict()
@@ -306,7 +322,6 @@ def main():
                             else: st.warning("حدد منتجاً أولاً.")
                         except Exception as e: st.error(f"❌ خطأ: {e}")
 
-                # أزرار التنقل للصفحات
                 with col_py1: st.button("⬅️ السابق", key="py_prev_y", on_click=prev_page, args=("page_yellow",), disabled=(st.session_state.page_yellow == 1))
                 with col_py2: st.markdown(f"<div style='text-align:center; padding-top:10px;'>صفحة {st.session_state.page_yellow} من {total_pages_y}</div>", unsafe_allow_html=True)
                 with col_py3: st.button("التالي ➡️", key="py_next_y", on_click=next_page, args=("page_yellow",), disabled=(st.session_state.page_yellow == total_pages_y))
@@ -319,7 +334,10 @@ def main():
                 for idx, row in page_df_y.iterrows():
                     p_name = row['product_name']
                     with st.container(border=True):
-                        st.markdown(f"**المنافسين:** {row.get('competitor_name')} | <span class='match-score score-yellow'>نسبة التطابق: {row.get('match_score')}%</span>", unsafe_allow_html=True)
+                        comps = str(row.get('competitor_name', '')).split('،')
+                        comps_html = "".join([f"<span class='competitor-tag'>🏪 {c.strip()}</span>" for c in comps if c.strip()])
+                        
+                        st.markdown(f"**متوفر لدى:** {comps_html} | <span class='match-score score-yellow'>شك بنسبة: {row.get('match_score')}%</span>", unsafe_allow_html=True)
                         
                         comp_col, mah_col = st.columns(2)
                         with comp_col:
@@ -329,13 +347,13 @@ def main():
                             st.markdown(f"<span class='price-text'>{row['price']} ر.س</span>", unsafe_allow_html=True)
                             
                         with mah_col:
-                            st.caption("📦 أقرب منتج لدينا (مهووس)")
+                            st.caption("📦 أقرب منتج لدينا (للتأكد)")
                             st.markdown(render_image(row.get('match_image')), unsafe_allow_html=True)
                             st.write(f"**{row.get('match_name')}**")
                             st.markdown(f"<span class='price-text'>{row.get('match_price')} ر.س</span>", unsafe_allow_html=True)
 
                         st.divider()
-                        b_cols = st.columns([0.5, 1, 1, 1, 1])
+                        b_cols = st.columns([0.5, 1.5, 1.5, 1.5, 1])
                         with b_cols[0]:
                             if st.checkbox("تحديد", key=f"chk_y_{idx}", value=p_name in st.session_state.selected_yellow):
                                 st.session_state.selected_yellow.add(p_name)
@@ -359,7 +377,7 @@ def main():
                                 
                         if b_cols[3].button("📤 إرسال لـ Make", key=f"btn_snd_y_{idx}", type="primary"):
                             try:
-                                with st.spinner(".."):
+                                with st.spinner("يولد الوصف..."):
                                     p_dict = row.to_dict()
                                     p_dict['description'] = generate_mahwous_description(p_name, row['price'])
                                     res = send_products_to_make([p_dict])
@@ -380,15 +398,16 @@ def main():
         with tab_red:
             df_r = df[df['confidence_level'] == 'red']
             
-            cr1, cr2 = st.columns(2)
+            cr1, cr2, cr3 = st.columns(3)
             with cr1: search_r = st.text_input("🔍 بحث في المتطابقة...", key="search_r")
-            with cr2: comp_r = st.selectbox("🏬 فلترة المنافسين (المتطابقة)", get_competitors_list(df_r), key="comp_r")
+            with cr2: comp_r = st.selectbox("🏬 فلترة المنافسين", get_unique_list(df_r, 'competitor_name'), key="comp_r")
+            with cr3: brand_r = st.selectbox("🏷️ فلترة الماركة", get_unique_list(df_r, 'brand'), key="brand_r")
             
             if search_r: df_r = df_r[df_r['product_name'].str.contains(search_r, case=False, na=False)]
             if comp_r != "الكل": df_r = df_r[df_r['competitor_name'].str.contains(comp_r, case=False, na=False)]
+            if brand_r != "الكل": df_r = df_r[df_r['brand'].astype(str) == brand_r]
 
             if not df_r.empty:
-                # نظام الصفحات للقسم الأحمر
                 total_pages_r = math.ceil(len(df_r) / ITEMS_PER_PAGE)
                 if st.session_state.page_red > total_pages_r: st.session_state.page_red = total_pages_r
 
@@ -405,7 +424,10 @@ def main():
                 for idx, row in page_df_r.iterrows():
                     p_name = row['product_name']
                     with st.container(border=True):
-                        st.markdown(f"**المنافسين:** {row.get('competitor_name')} | <span class='match-score score-red'>متطابق بنسبة: {row.get('match_score')}%</span>", unsafe_allow_html=True)
+                        comps = str(row.get('competitor_name', '')).split('،')
+                        comps_html = "".join([f"<span class='competitor-tag'>🏪 {c.strip()}</span>" for c in comps if c.strip()])
+                        
+                        st.markdown(f"**متوفر لدى:** {comps_html} | <span class='match-score score-red'>تأكد بنسبة: {row.get('match_score')}%</span>", unsafe_allow_html=True)
                         
                         comp_col, mah_col = st.columns(2)
                         with comp_col:
@@ -415,7 +437,7 @@ def main():
                             st.write(f"{row['price']} ر.س")
                             
                         with mah_col:
-                            st.caption("📦 منتجنا (مهووس)")
+                            st.caption("📦 منتجنا (متوفر فعلاً)")
                             st.markdown(render_image(row.get('match_image'), 120), unsafe_allow_html=True)
                             st.write(f"**{row.get('match_name')}**")
                             st.write(f"{row.get('match_price')} ر.س")
