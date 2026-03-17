@@ -1,9 +1,9 @@
 """
-app.py v5.1 — واجهة المستخدم التفاعلية مع صور المقارنة
+app.py v5.2 — واجهة المستخدم التفاعلية مع صور المقارنة والمزامنة النهائية
 ═══════════════════════════════════════════════════════════
 - تصميم عريض وتفاعلي مع صور مقارنة (Side-by-Side)
 - معالجة في الخلفية (Threading) مع إصلاح التزامن
-- تحديث التقدم لحظياً (Live Updates)
+- تحديث التقدم لحظياً ومزامنة الحالة النهائية عبر st.rerun()
 """
 
 import streamlit as st
@@ -32,6 +32,7 @@ if 'processed_count' not in st.session_state: st.session_state.processed_count =
 if 'total_count' not in st.session_state: st.session_state.total_count = 0
 if 'analysis_results' not in st.session_state: st.session_state.analysis_results = []
 if 'ignore_list' not in st.session_state: st.session_state.ignore_list = set()
+if 'needs_rerun' not in st.session_state: st.session_state.needs_rerun = False
 
 # 3. CSS مخصص
 st.markdown("""
@@ -72,7 +73,7 @@ st.markdown("""
     }
     .image-container {
         display: flex;
-        gap: 1rem;
+        gap: 1.5rem;
         justify-content: center;
         align-items: center;
         flex-wrap: wrap;
@@ -90,6 +91,7 @@ st.markdown("""
         color: #64748b;
         margin-bottom: 0.25rem;
         text-align: center;
+        font-weight: 600;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -111,6 +113,7 @@ def main():
                 c_data = {f.name: load_competitor_data(f) for f in competitor_files}
                 # بدء المعالجة في الخلفية
                 start_background_analysis(m_df, c_data)
+                st.session_state.needs_rerun = False
                 st.rerun()
             else:
                 st.error("الرجاء رفع كافة الملفات المطلوبة.")
@@ -119,6 +122,11 @@ def main():
             if st.button("🛑 إيقاف المعالجة", type="secondary", use_container_width=True):
                 st.session_state.analysis_running = False
                 st.rerun()
+
+    # المزامنة النهائية
+    if st.session_state.needs_rerun and not st.session_state.analysis_running:
+        st.session_state.needs_rerun = False
+        st.rerun()
 
     # عرض التقدم المباشر
     if st.session_state.analysis_running or st.session_state.processed_count > 0:
@@ -130,7 +138,7 @@ def main():
             cols[1].write(f"**{progress*100:.1f}%**")
             
             if st.session_state.analysis_running:
-                time.sleep(0.5)
+                time.sleep(1) # تقليل تكرار التحديث لزيادة الاستقرار
                 st.rerun()
 
     # لوحة الإحصائيات والنتائج
@@ -160,12 +168,12 @@ def main():
                         st.markdown(f"""
                         <div class="product-card">
                             <div style="display: flex; gap: 2rem; align-items: start; flex-wrap: wrap;">
-                                <div class="image-container" style="flex: 1.5; min-width: 300px;">
-                                    <div>
+                                <div class="image-container" style="flex: 1.5; min-width: 320px;">
+                                    <div style="flex: 1;">
                                         <p class="img-label">صورة المنافس</p>
                                         <img src="{comp_img}" class="product-img">
                                     </div>
-                                    <div>
+                                    <div style="flex: 1;">
                                         <p class="img-label">أقرب مطابقة لدينا</p>
                                         <img src="{match_img}" class="product-img">
                                     </div>

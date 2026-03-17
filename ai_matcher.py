@@ -1,8 +1,9 @@
 """
-ai_matcher.py v5.1 — إصلاح التزامن ودعم صور المقارنة
+ai_matcher.py v5.2 — تحسين الاستقرار وتمرير الصور
 ═══════════════════════════════════════════════════════════════
-- إصلاح تجميد Streamlit عبر تحديث Session State خارج المهام غير المتزامنة
-- إضافة صورة المنتج المطابق (Match Image) للنتائج للمقارنة البصرية
+- تمرير match_image ضمن قاموس النتائج للمقارنة البصرية
+- جمع نتائج الدفعات (Batches) باستخدام asyncio.gather
+- تحديث st.session_state بشكل آمن لتجنب تجميد الواجهة
 """
 
 import re
@@ -87,7 +88,7 @@ async def process_item_pipeline(comp_row: Dict, mahwous_df: pd.DataFrame, tfidf_
     best_score = 0
     best_match_idx = -1
     
-    # الطبقة الأولى والثانية: البحث السريع
+    # البحث السريع
     for j, mah_row in mahwous_df.iterrows():
         score = get_hybrid_score(comp_name, mah_row['product_name'], tfidf_matrix, comp_idx, j)
         if score > best_score:
@@ -108,7 +109,7 @@ async def process_item_pipeline(comp_row: Dict, mahwous_df: pd.DataFrame, tfidf_
             confidence = "red"
             match_name = mahwous_df.iloc[best_match_idx]['product_name']
         elif best_score > 50:
-            # الطبقة الثالثة: التحقق بالذكاء الاصطناعي
+            # التحقق بالذكاء الاصطناعي
             ai_res = await ai_deep_verify_single(comp_name, mahwous_df.iloc[best_match_idx]['product_name'])
             if ai_res.get("is_match"):
                 status = "Exact Duplicate"
@@ -164,6 +165,8 @@ async def background_analysis_task(mahwous_df: pd.DataFrame, competitor_files_da
         st.session_state.processed_count += len(batch_results)
         
     st.session_state.analysis_running = False
+    # إشارة للمزامنة النهائية
+    st.session_state.needs_rerun = True
 
 def start_background_analysis(mahwous_df: pd.DataFrame, competitor_files_data: Dict[str, pd.DataFrame]):
     """بدء المعالجة في Thread منفصل لضمان عدم تجميد الواجهة."""
