@@ -1,15 +1,15 @@
 """
-ai_engine.py v14.6 — المحرك الشامل (استعادة كافة الميزات + النظام الهجين)
+ai_engine.py v14.7 — المحرك الهجين الصارم (AI + Python)
 ═══════════════════════════════════════════════════════════════
-- استعادة وظائف البحث والمطابقة والتحليل السعري السابقة.
-- دمج النظام الهجين: وصف "خبير مهووس" (AI أولاً، ثم القوالب الذكية).
-- استعادة دعم الروابط الداخلية والمكونات الحقيقية من Fragrantica.
-- حماية كافة الوظائف من الحذف أو النسيان لضمان استقرار التطبيق.
+- تفعيل المنطق الهجين الصارم لسحب الصور وتوليد الوصف.
+- حقن الروابط الداخلية الثابتة لمهووس برمجياً في كافة الأوصاف.
+- ضمان العودة لبيانات المنافس (Python Fallback) في حال فشل الـ AI.
 """
 
 import requests
 import json
 import re
+import urllib.parse
 import asyncio
 import google.generativeai as genai
 from config import GEMINI_API_KEY
@@ -26,6 +26,9 @@ MAHWOUS_INTERNAL_LINKS = {
     "عطور التستر": "https://mahwous.com/عطور-التستر-نسائية/c734563747",
     "متجر مهووس": "https://mahwous.com/"
 }
+
+# الروابط الثابتة المطلوب حقنها في نهاية كل وصف
+MAHWOUS_FIXED_FOOTER = '<p>لمشاهدة المزيد من <a href="https://mahwous.com/tags/perfumes">العطور الفاخرة</a> أو استكشاف <a href="https://mahwous.com/brands">أشهر الماركات</a>، تفضل بزيارة متجرنا.</p>'
 
 def _parse_json(txt):
     if not txt: return None
@@ -57,19 +60,18 @@ def _search_ddg(query, num_results=3):
                 if isinstance(rel, dict) and rel.get("Text"):
                     results.append({"snippet": rel.get("Text", ""), "url": rel.get("FirstURL", "")})
             return results
-    except Exception:
-        pass
+    except Exception: pass
     return []
 
-def fetch_product_images(product_name, brand=""):
-    """جلب روابط صور المنتج (النظام الهجين)."""
+def fetch_product_images(product_name, brand="", competitor_image=None):
+    """جلب روابط صور المنتج (دالة هجينة صارمة)."""
     images = []
     fragrantica_url = ""
     
-    # 1. محاولة بالذكاء الاصطناعي
+    # الحالة أ: توفر ذكاء صناعي لفلترة الصور
     if GEMINI_API_KEY:
         model = genai.GenerativeModel('gemini-2.0-flash')
-        prompt = f"""ابحث عن صور للعطر "{product_name} {brand}" بخلفية بيضاء.
+        prompt = f"""ابحث عن صور نظيفة للعطر "{product_name} {brand}" بخلفية بيضاء.
 أجب بصيغة JSON فقط: {{"images": [{{"url": "رابط الصورة"}}], "fragrantica_url": "رابط الصفحة", "found": true}}"""
         try:
             response = model.generate_content(prompt)
@@ -81,21 +83,22 @@ def fetch_product_images(product_name, brand=""):
                 fragrantica_url = data.get("fragrantica_url", "")
         except Exception: pass
 
-    # 2. بديل برمجي (DDG)
-    if not images:
+    # الحالة ب: فشل الـ AI - العودة لرابط المنافس وتنظيفه برمجياً (Python)
+    if not images and competitor_image:
+        url = str(competitor_image).strip()
+        if url.startswith("//"): url = "https:" + url
         try:
-            ddg = _search_ddg(product_name)
-            for r in ddg:
-                img = r.get("image", "")
-                if img and img.startswith("http"):
-                    images.append({"url": img, "source": "DDG"})
-                    break
+            # تشفير الروابط التي قد تحتوي على حروف عربية أو رموز
+            parsed = urllib.parse.urlparse(url)
+            clean_path = urllib.parse.quote(parsed.path, safe="/%")
+            url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, clean_path, parsed.params, parsed.query, parsed.fragment))
+            images.append({"url": url, "source": "Competitor_Fixed"})
         except Exception: pass
 
+    # الملاذ الأخير: Placeholder
     if not images:
-        safe_name = product_name.replace(' ', '+')
-        placeholder = f"https://ui-avatars.com/api/?name={safe_name}&background=random&size=512"
-        images.append({"url": placeholder, "source": "Placeholder"})
+        safe_name = urllib.parse.quote(product_name)
+        images.append({"url": f"https://ui-avatars.com/api/?name={safe_name}&background=random&size=512", "source": "Placeholder"})
 
     return {"images": images, "fragrantica_url": fragrantica_url, "success": True}
 
@@ -112,47 +115,43 @@ def fetch_fragrantica_info(product_name):
     except Exception: pass
     return {"success": False}
 
-def _generate_smart_template_description(product_name, price, fragrantica_data=None):
-    """توليد وصف احترافي برمجياً (بدون AI) مع روابط داخلية ومكونات."""
-    top = ", ".join(fragrantica_data.get("top_notes", [])) if fragrantica_data and fragrantica_data.get("top_notes") else "مزيج منعش"
-    mid = ", ".join(fragrantica_data.get("middle_notes", [])) if fragrantica_data and fragrantica_data.get("middle_notes") else "قلب زهري فاخر"
-    base = ", ".join(fragrantica_data.get("base_notes", [])) if fragrantica_data and fragrantica_data.get("base_notes") else "قاعدة دافئة"
-    
-    brand = fragrantica_data.get("brand", "ماركة عالمية") if fragrantica_data else "ماركة عالمية"
-    
+def _generate_structural_html_description(product_name, price, brand=""):
+    """بناء وصف هيكلي (Structural HTML) برمجياً بدون ذكاء صناعي."""
     link_store = f'<a href="{MAHWOUS_INTERNAL_LINKS["متجر مهووس"]}">متجر مهووس</a>'
-    link_women = f'<a href="{MAHWOUS_INTERNAL_LINKS["عطور نسائية"]}">عطور نسائية</a>'
-    
     desc = f"""
-    <h2>سحر {product_name}: تجربة عطرية لا تُنسى</h2>
-    <p>اكتشف الفخامة مع <strong>{product_name}</strong>، المتوفر الآن في {link_store} بسعر حصري {price} ريال سعودي.</p>
-    <h3>الهرم العطري</h3>
+    <h2>{product_name}</h2>
+    <p>اكتشف الفخامة والأناقة مع <strong>{product_name}</strong> من {brand if brand else 'ماركة عالمية'}، المتوفر الآن في {link_store} بسعر حصري {price} ريال سعودي.</p>
+    <h3>مميزات المنتج</h3>
     <ul>
-        <li><strong>الافتتاحية:</strong> {top}</li>
-        <li><strong>القلب:</strong> {mid}</li>
-        <li><strong>القاعدة:</strong> {base}</li>
+        <li>منتج أصلي 100%</li>
+        <li>تغليف فاخر يليق بهداياكم</li>
+        <li>شحن سريع لكافة مناطق المملكة</li>
     </ul>
-    <p>في مهووس، نضمن لك الحصول على {link_women} أصلية 100%.</p>
+    {MAHWOUS_FIXED_FOOTER}
     """
     return desc.strip()
 
-def generate_mahwous_description(product_name, price, fragrantica_data=None):
-    """توليد الوصف (AI أولاً، ثم القوالب الذكية)."""
+def generate_mahwous_description(product_name, price, brand="", fragrantica_data=None):
+    """توليد الوصف (AI أولاً، ثم الهيكل البرمجي)."""
+    # الحالة أ: توفر ذكاء صناعي
     if GEMINI_API_KEY:
         model = genai.GenerativeModel('gemini-2.0-flash')
         links_ctx = "\n".join([f"- {k}: {v}" for k, v in MAHWOUS_INTERNAL_LINKS.items()])
         prompt = f"""أنت "خبير وصف منتجات مهووس". اكتب وصفاً مطولاً (1500 كلمة) لـ {product_name} بسعر {price}.
 استخدم الروابط الداخلية: {links_ctx}
 المكونات: {fragrantica_data if fragrantica_data else "Fragrantica search"}
-التنسيق: HTML/Markdown بدون إيموجي. الهيكلية: H1، مقدمة، تفاصيل، هرم عطري، FAQ، خاتمة."""
+التنسيق: HTML/Markdown بدون إيموجي. في النهاية، يجب إضافة هذا النص تماماً: {MAHWOUS_FIXED_FOOTER}"""
         try:
             response = model.generate_content(prompt)
             text = re.sub(r'```html|```markdown|```', '', response.text).strip()
-            if len(text) > 500: return text
+            if len(text) > 500: 
+                if MAHWOUS_FIXED_FOOTER not in text: text += "\n" + MAHWOUS_FIXED_FOOTER
+                return text
         except Exception: pass
-    return _generate_smart_template_description(product_name, price, fragrantica_data)
+        
+    # الحالة ب: بدون ذكاء صناعي (بناء هيكلي برمجياً)
+    return _generate_structural_html_description(product_name, price, brand)
 
-# استعادة وظائف البحث والمطابقة السابقة
 def search_market_price(product_name, our_price=0):
     if not GEMINI_API_KEY: return {"success": False}
     model = genai.GenerativeModel('gemini-2.0-flash')
