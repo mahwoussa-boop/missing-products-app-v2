@@ -1,9 +1,8 @@
 """
-app.py v7.0 — واجهة المستخدم التفاعلية (Ultra-Fast Edition)
+app.py v7.1 — واجهة المستخدم التفاعلية (Fix Duplicate Keys & UI Alignment)
 ═══════════════════════════════════════════════════════════
-- تصميم عريض وتفاعلي مع مقارنة بصرية (صورة بصورة)
-- متوافق تماماً مع المحرك الصاروخي الجديد (v7.0)
-- تحديث التقدم لحظياً (Live Updates) بدون تجميد
+- حل مشكلة انهيار التطبيق (StreamlitDuplicateElementKey) عبر مفاتيح فريدة.
+- تحسين عرض الصور والبطاقات ليكون متناسقاً ولا يتمدد بشكل عشوائي.
 """
 
 import streamlit as st
@@ -74,7 +73,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 def main():
-    st.markdown(f'<div class="main-header"><h1>{APP_ICON} {APP_TITLE}</h1><p>الإصدار v7.0 | نظام ذكاء الأعمال للمنافسين - معالجة صاروخية</p></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="main-header"><h1>{APP_ICON} {APP_TITLE}</h1><p>الإصدار v7.1 | نظام ذكاء الأعمال للمنافسين - معالجة صاروخية</p></div>', unsafe_allow_html=True)
 
     # الشريط الجانبي
     with st.sidebar:
@@ -85,14 +84,10 @@ def main():
         st.divider()
         if st.button("🚀 بدء التحليل الشامل", type="primary", use_container_width=True, disabled=st.session_state.analysis_running):
             if mahwous_file and competitor_files:
-                # تحميل البيانات
                 m_df = load_mahwous_store_data(mahwous_file)
                 c_data = {f.name: load_competitor_data(f) for f in competitor_files}
                 
-                # تفعيل حالة التشغيل فوراً ليعمل شريط التقدم دون تأخير
                 st.session_state.analysis_running = True
-                
-                # بدء المعالجة في الخلفية
                 start_background_analysis(m_df, c_data)
                 st.rerun()
             else:
@@ -119,7 +114,6 @@ def main():
     # لوحة الإحصائيات والنتائج
     if st.session_state.analysis_results:
         df = pd.DataFrame(st.session_state.analysis_results)
-        # تصفية المتجاهلة
         df = df[~df['product_name'].isin(st.session_state.ignore_list)]
         
         if not df.empty:
@@ -129,23 +123,24 @@ def main():
             c3.metric("🟡 مراجعة", len(df[df['confidence_level'] == 'yellow']))
             c4.metric("🔴 مكرر", len(df[df['confidence_level'] == 'red']))
 
-            # عرض النتائج في Tabs
             tab1, tab2, tab3 = st.tabs(["🟢 مفقود مؤكد", "🟡 يحتاج مراجعة", "🔴 مكرر"])
             
             def render_products(level):
                 filtered = df[df['confidence_level'] == level]
-                for _, row in filtered.iterrows():
+                # التعديل 1: استخدام enumerate لإنشاء مفتاح فريد لكل زر لمنع الانهيار
+                for unique_id, (idx, row) in enumerate(filtered.iterrows()):
                     with st.container():
+                        # التعديل 2: align-items: center; وتثبيت مقاسات الصور (120px)
                         st.markdown(f"""
                         <div class="product-card">
-                            <div style="display: flex; gap: 1.5rem; align-items: start;">
+                            <div style="display: flex; gap: 1.5rem; align-items: center;">
                                 <div style="flex: 1; text-align: center;">
                                     <p style="font-size: 0.8rem; color: #64748b;">🏪 المنافس</p>
-                                    <img src="{row.get('image_url', '')}" style="width: 100%; max-width: 140px; border-radius: 0.5rem; border: 1px solid #e2e8f0; object-fit: contain;" onerror="this.src='https://via.placeholder.com/140?text=No+Image'">
+                                    <img src="{row.get('image_url', '')}" style="width: 100%; max-width: 120px; height: 120px; border-radius: 0.5rem; border: 1px solid #e2e8f0; object-fit: contain; background-color: #f8fafc;" onerror="this.src='https://via.placeholder.com/120?text=No+Image'">
                                 </div>
                                 <div style="flex: 1; text-align: center;">
                                     <p style="font-size: 0.8rem; color: #64748b;">📦 أقرب مطابقة لدينا</p>
-                                    <img src="{row.get('match_image', '')}" style="width: 100%; max-width: 140px; border-radius: 0.5rem; border: 1px solid #e2e8f0; object-fit: contain;" onerror="this.style.display='none'">
+                                    <img src="{row.get('match_image', '')}" style="width: 100%; max-width: 120px; height: 120px; border-radius: 0.5rem; border: 1px solid #e2e8f0; object-fit: contain; background-color: #f8fafc;" onerror="this.style.display='none'">
                                 </div>
                                 <div style="flex: 3;">
                                     <span class="badge badge-{row['confidence_level']}">{row['status']}</span>
@@ -162,20 +157,20 @@ def main():
                         </div>
                         """, unsafe_allow_html=True)
                         
-                        # أزرار الإجراءات (خارج الـ HTML لتعمل مع Streamlit)
+                        # أزرار الإجراءات مع المفاتيح الفريدة
                         btn_cols = st.columns([4, 1.5, 1.5, 1.5])
                         with btn_cols[1]:
-                            if st.button("✅ أضف لـ Make", key=f"make_{row['product_name']}"):
+                            if st.button("✅ أضف لـ Make", key=f"make_{level}_{unique_id}"):
                                 res = send_products_to_make([row.to_dict()])
                                 if res['success']: st.toast("✅ تم الإرسال بنجاح!", icon="🚀")
                                 else: st.error("فشل الإرسال")
                         with btn_cols[2]:
-                            if st.button("🔍 تحقق عميق", key=f"ai_{row['product_name']}"):
+                            if st.button("🔍 تحقق عميق", key=f"ai_{level}_{unique_id}"):
                                 with st.spinner("جاري إعادة التحقق..."):
                                     res = asyncio.run(ai_deep_verify_single(row['product_name'], row.get('match_name', '')))
                                     st.info(f"النتيجة: {res['reason']}")
                         with btn_cols[3]:
-                            if st.button("🗑️ تجاهل", key=f"ign_{row['product_name']}"):
+                            if st.button("🗑️ تجاهل", key=f"ign_{level}_{unique_id}"):
                                 st.session_state.ignore_list.add(row['product_name'])
                                 st.rerun()
 
