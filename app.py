@@ -1,206 +1,268 @@
 """
-ai_matcher.py v7.1 — محرك المطابقة الصاروخي (Ultra-Fast & High Accuracy)
+app.py v7.1 — واجهة المستخدم التفاعلية التحديث الشامل
 ═══════════════════════════════════════════════════════════════
-- تسريع الأداء 1000 ضعف باستخدام RapidFuzz Engine
-- الحفاظ على نفس دقة المطابقة (بدون أي تأثير على النتائج)
-- تنظيف النصوص مسبقاً مرة واحدة لمنع خنق المعالج (CPU Bottleneck)
-- منع تجميد شريط التقدم تماماً
-- التدقيق العكسي الصارم للحد المانع (>90%)
+- تصميم احترافي باستخدام layout='wide'
+- عرض الصور جنباً إلى جنب للمقارنة اليدوية الدقيقة
+- معالجة آمنة للحالة (Session State) وتحديث حي لشريط التقدم
+- هوية بصرية تتناسب مع متجر "مهووس" باللغة العربية
 """
 
-import re
-import json
-import asyncio
-import pandas as pd
 import streamlit as st
-import google.generativeai as genai
-from rapidfuzz import process, fuzz
-from typing import List, Dict, Any, Tuple, Optional
-from datetime import datetime
-import threading
+import pandas as pd
+import time
+import asyncio
+from db_manager import load_mahwous_store_data, load_competitor_data
+from ai_matcher import start_background_analysis, ai_deep_verify_single
+from make_sender import send_products_to_make
+from config import APP_TITLE, APP_ICON
 
-from config import GEMINI_API_KEY
+# إعدادات الصفحة (Wide Layout)
+st.set_page_config(
+    page_title=APP_TITLE,
+    page_icon=APP_ICON,
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# إعداد Gemini
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-
-def normalize_arabic(text: str) -> str:
-    """تنظيف وتوحيد النصوص العربية والإنجليزية لضمان دقة المطابقة."""
-    if not text or pd.isna(text): return ""
-    text = str(text).lower().strip()
-    text = re.sub("[إأآا]", "ا", text)
-    text = re.sub("ة", "ه", text)
-    text = re.sub("ى", "ي", text)
-    text = re.sub(r"[\u064B-\u0652]", "", text)
-    text = re.sub(r"[^\w\s]", " ", text)
-    return " ".join(text.split())
-
-async def ai_deep_verify_single(prod_name: str, comp_name: str) -> Dict:
-    """التحقق الدقيق من منتج واحد عبر الذكاء الاصطناعي (Gemini)."""
-    if not GEMINI_API_KEY:
-        return {"is_match": False, "reason": "No API Key"}
-        
-    prompt = f"""
-    بصفتك خبير عطور، هل هذين المنتجين هما نفس المنتج تماماً؟
-    الفروقات الحرجة (تجعلهما مختلفين):
-    1. الحجم (50ml vs 100ml).
-    2. التركيز (EDP vs EDT vs Parfum).
-    3. النوع (Tester vs Original vs Hair Mist).
-    4. المجموعات (Set) مقابل العلب المنفردة.
-
-    المنتج 1: {prod_name}
-    المنتج 2: {comp_name}
-
-    أجب بصيغة JSON فقط:
-    {{"is_match": true/false, "reason": "سبب موجز بالعربية"}}
-    """
-    try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = await asyncio.to_thread(model.generate_content, prompt)
-        res_text = re.sub(r'```json\s*|\s*```', '', response.text).strip()
-        data = json.loads(res_text)
-        return data
-    except Exception as e:
-        return {"is_match": False, "reason": f"AI Error: {str(e)}"}
-
-def get_hybrid_score(n1: str, n2: str) -> float:
-    """حساب درجة التشابه الهجين الدقيقة جداً."""
-    token_sort = fuzz.token_sort_ratio(n1, n2)
-    partial_ratio = fuzz.partial_ratio(n1, n2)
-    return (token_sort * 0.6) + (partial_ratio * 0.4)
-
-async def process_item_pipeline(comp_row: Dict, mahwous_df: pd.DataFrame, mahwous_norm_dict: Dict[int, str]):
-    """معالجة ذكية وسريعة للمنتج بدون خنق الذاكرة."""
-    try:
-        comp_name = str(comp_row.get('product_name', ''))
-        comp_name_norm = normalize_arabic(comp_name)
-        
-        best_score = 0
-        best_match_idx = -1
-        
-        # 1. فلترة صاروخية: جلب أفضل 10 تطابقات محتملة فقط بدلاً من البحث في 3000 منتج
-        top_candidates = process.extract(comp_name_norm, mahwous_norm_dict, limit=10, scorer=fuzz.WRatio)
-        
-        # 2. فحص دقيق: تطبيق الخوارزمية الهجينة الدقيقة على هذه الـ 10 منتجات فقط (يحافظ على الدقة 100%)
-        for match_tuple in top_candidates:
-            mah_norm = match_tuple[0]  # النص المنظف لمنتجنا
-            idx = match_tuple[2]       # الفهرس
-            
-            score = get_hybrid_score(comp_name_norm, mah_norm)
-            if score > best_score:
-                best_score = score
-                best_match_idx = idx
-
-        # 3. التصنيف والتحقق بالذكاء الاصطناعي
-        status = "Confirmed Missing"
-        confidence = "green"
-        match_name = ""
-        
-        if best_score > 90:  # تطبيق صارم لقاعدة 90% لاعتباره منتجاً مكرراً
-            status = "Exact Duplicate"
-            confidence = "red"
-            match_name = str(mahwous_df.iloc[best_match_idx]['product_name'])
-        elif best_score > 50:
-            match_name_candidate = str(mahwous_df.iloc[best_match_idx]['product_name'])
-            # تحقق عميق عبر AI
-            ai_res = await ai_deep_verify_single(comp_name, match_name_candidate)
-            if ai_res.get("is_match"):
-                status = "Exact Duplicate"
-                confidence = "red"
-                match_name = match_name_candidate
-            else:
-                status = "Potential Match"
-                confidence = "yellow"
-                match_name = f"{match_name_candidate} ({ai_res.get('reason')})"
-        
-        # جلب الصورة الخاصة بمنتجنا لعرضها في المقارنة
-        match_image = str(mahwous_df.iloc[best_match_idx].get('image_url', '')) if best_match_idx != -1 else ""
-
-        return {
-            **comp_row,
-            "status": status,
-            "confidence_level": confidence,
-            "match_name": match_name,
-            "match_image": match_image,
-            "confidence_score": best_score,
-            "detection_date": datetime.now().strftime("%Y-%m-%d")
-        }
-
-    except Exception as e:
-        return {
-            **comp_row,
-            "status": f"Error: {str(e)[:50]}",
-            "confidence_level": "red",
-            "match_name": "",
-            "match_image": "",
-            "confidence_score": 0,
-            "detection_date": datetime.now().strftime("%Y-%m-%d")
-        }
-
-async def background_analysis_task(mahwous_df: pd.DataFrame, competitor_files_data: Dict[str, pd.DataFrame]):
-    """إدارة المهمة الخلفية بفعالية وتوزيع المهام كدفعات."""
-    try:
-        # ترتيب الفهرس لمنع أي انهيار عند البحث
-        mahwous_df = mahwous_df.reset_index(drop=True)
-        
-        # ==========================================
-        # الخطوة الأهم لتسريع الأداء 1000x:
-        # تنظيف نصوص متجرنا بالكامل *مرة واحدة فقط* وحفظها في قاموس
-        # ==========================================
-        mahwous_norm_dict = {idx: normalize_arabic(str(name)) for idx, name in mahwous_df['product_name'].items()}
-
-        all_comp_list = []
-        for comp_name, df in competitor_files_data.items():
-            if not df.empty:
-                df['competitor_name'] = comp_name
-                all_comp_list.append(df)
-        
-        if not all_comp_list:
-            return
-
-        competitor_df = pd.concat(all_comp_list, ignore_index=True)
-        st.session_state.total_count = len(competitor_df)
-        st.session_state.processed_count = 0
-        
-        # تقسيم المعالجة إلى دفعات صغيرة (Batches) لمنع تجمد التطبيق
-        batch_size = 15
-        for i in range(0, len(competitor_df), batch_size):
-            batch = competitor_df.iloc[i : i + batch_size]
-            tasks = []
-            for _, row in batch.iterrows():
-                # إرسال القاموس الجاهز للدالة لمنع التكرار
-                tasks.append(process_item_pipeline(row.to_dict(), mahwous_df, mahwous_norm_dict))
-            
-            # انتظار إنهاء الدفعة بالكامل
-            batch_results = await asyncio.gather(*tasks)
-            
-            # تحديث الواجهة بأمان
-            if 'analysis_results' not in st.session_state:
-                st.session_state.analysis_results = []
-            st.session_state.analysis_results.extend(batch_results)
-            st.session_state.processed_count += len(batch_results)
-            
-    except Exception as e:
-        if 'analysis_results' not in st.session_state:
-            st.session_state.analysis_results = []
-        st.session_state.analysis_results.append({
-            "product_name": "CRITICAL ERROR", 
-            "status": str(e), 
-            "confidence_level": "red"
-        })
-    finally:
-        st.session_state.analysis_running = False
-
-def start_background_analysis(mahwous_df: pd.DataFrame, competitor_files_data: Dict[str, pd.DataFrame]):
-    """بدء المعالجة في خيط خلفي (Thread) آمن."""
-    def run():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(background_analysis_task(mahwous_df, competitor_files_data))
-        loop.close()
+# تنسيق CSS احترافي (RTL & Cards)
+st.markdown("""
+<style>
+    .stApp { direction: rtl; }
+    [data-testid="stSidebar"] { direction: rtl; }
     
-    thread = threading.Thread(target=run)
-    from streamlit.runtime.scriptrunner import add_script_run_ctx
-    add_script_run_ctx(thread)
-    thread.start()
+    .main-header {
+        background: linear-gradient(90deg, #0f172a 0%, #1e293b 100%);
+        padding: 2rem;
+        border-radius: 1rem;
+        color: white;
+        margin-bottom: 2rem;
+        text-align: center;
+        border-bottom: 4px solid #6C63FF;
+    }
+    
+    .product-card {
+        background: #1a1a2e;
+        border: 1px solid #2d3748;
+        border-radius: 1rem;
+        padding: 1.5rem;
+        margin-bottom: 1.5rem;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
+        color: #e2e8f0;
+    }
+    
+    .badge {
+        padding: 0.4rem 1rem;
+        border-radius: 2rem;
+        font-size: 0.85rem;
+        font-weight: 700;
+        display: inline-block;
+        margin-bottom: 0.5rem;
+    }
+    
+    .badge-green { background: #dcfce7; color: #166534; }
+    .badge-yellow { background: #fef9c3; color: #854d0e; }
+    .badge-red { background: #fee2e2; color: #991b1b; }
+    
+    .img-container {
+        text-align: center;
+        padding: 10px;
+        background: #ffffff;
+        border-radius: 0.5rem;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+    }
+    
+    .img-container img {
+        max-width: 150px;
+        max-height: 150px;
+        object-fit: contain;
+    }
+    
+    .img-title {
+        font-size: 0.8rem;
+        color: #4a5568;
+        margin-bottom: 5px;
+        font-weight: bold;
+    }
+    
+    .stButton > button {
+        border-radius: 0.5rem;
+        font-weight: 600;
+        width: 100%;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# تهيئة المتغيرات في Session State
+if 'analysis_running' not in st.session_state:
+    st.session_state.analysis_running = False
+if 'processed_count' not in st.session_state:
+    st.session_state.processed_count = 0
+if 'total_count' not in st.session_state:
+    st.session_state.total_count = 0
+if 'analysis_results' not in st.session_state:
+    st.session_state.analysis_results = []
+if 'ignore_list' not in st.session_state:
+    st.session_state.ignore_list = set()
+
+def render_products(level: str, filtered_results: list):
+    """عرض المنتجات داخل بطاقات أنيقة مع مقارنة الصور جنباً إلى جنب."""
+    if not filtered_results:
+        st.info("لا توجد منتجات في هذا التصنيف حالياً.")
+        return
+
+    for idx, row in enumerate(filtered_results):
+        prod_name = row.get("product_name", "بدون اسم")
+        
+        # تخطي المنتجات المتجاهلة
+        if prod_name in st.session_state.ignore_list:
+            continue
+
+        comp_img = row.get("image_url", "")
+        mah_img = row.get("match_image", "")
+        status = row.get("status", "")
+        price = row.get("price", 0.0)
+        brand = row.get("brand", "غير معروف")
+        comp_name = row.get("competitor_name", "")
+        match_name = row.get("match_name", "لا يوجد")
+        confidence = row.get("confidence_level", "yellow")
+
+        st.markdown('<div class="product-card">', unsafe_allow_html=True)
+        
+        # تقسيم البطاقة إلى 3 أعمدة (صورة المنافس | التفاصيل والإجراءات | صورة منتجنا)
+        col1, col2, col3 = st.columns([1, 2, 1])
+        
+        with col1:
+            st.markdown(f'''
+                <div class="img-container">
+                    <div class="img-title">صورة المنافس</div>
+                    <img src="{comp_img}" onerror="this.src='https://via.placeholder.com/150?text=No+Image'">
+                </div>
+            ''', unsafe_allow_html=True)
+            
+        with col2:
+            st.markdown(f'<span class="badge badge-{confidence}">{status}</span>', unsafe_allow_html=True)
+            st.markdown(f'<h3 style="margin: 0.5rem 0; color: white;">{prod_name}</h3>', unsafe_allow_html=True)
+            st.markdown(f'<p style="color: #6C63FF; font-weight: 700; font-size: 1.2rem;">{price} ر.س</p>', unsafe_allow_html=True)
+            st.markdown(f'<p style="color: #a0aec0;">الماركة: {brand} | المنافس: {comp_name}</p>', unsafe_allow_html=True)
+            st.markdown('<hr style="border-top: 1px solid #2d3748; margin: 1rem 0;">', unsafe_allow_html=True)
+            st.markdown(f'<p style="color: #e2e8f0;"><b>أقرب مطابقة لدينا:</b> {match_name}</p>', unsafe_allow_html=True)
+            
+            # أزرار الإجراءات
+            btn_cols = st.columns(3)
+            with btn_cols[0]:
+                if st.button("✅ أضف لـ Make", key=f"make_{level}_{idx}"):
+                    with st.spinner("جاري الإرسال..."):
+                        res = send_products_to_make([row])
+                        if res.get("success"):
+                            st.toast("✅ تم الإرسال بنجاح!", icon="🚀")
+                            st.session_state.ignore_list.add(prod_name)
+                            st.rerun()
+                        else:
+                            st.error("فشل الإرسال")
+            with btn_cols[1]:
+                if st.button("🔍 تحقق عميق", key=f"ai_{level}_{idx}"):
+                    with st.spinner("جاري التحقق عبر الذكاء الاصطناعي..."):
+                        ai_res = asyncio.run(ai_deep_verify_single(prod_name, match_name))
+                        st.info(f"النتيجة: {ai_res.get('reason')}")
+            with btn_cols[2]:
+                if st.button("🗑️ تجاهل", key=f"ign_{level}_{idx}"):
+                    st.session_state.ignore_list.add(prod_name)
+                    st.rerun()
+                    
+        with col3:
+            if mah_img:
+                st.markdown(f'''
+                    <div class="img-container">
+                        <div class="img-title">منتجنا (للمقارنة)</div>
+                        <img src="{mah_img}" onerror="this.src='https://via.placeholder.com/150?text=No+Image'">
+                    </div>
+                ''', unsafe_allow_html=True)
+            else:
+                st.markdown('''
+                    <div class="img-container" style="background: #f8fafc;">
+                        <div class="img-title">لا يوجد منتج مطابق بصرياً</div>
+                    </div>
+                ''', unsafe_allow_html=True)
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+def main():
+    st.markdown(f'''
+        <div class="main-header">
+            <h1>{APP_ICON} {APP_TITLE}</h1>
+            <p>نظام ذكاء الأعمال للمنافسين - معالجة فائقة السرعة ودقة مطلقة</p>
+        </div>
+    ''', unsafe_allow_html=True)
+
+    with st.sidebar:
+        st.header("📂 مصادر البيانات")
+        mahwous_file = st.file_uploader("ملف متجر مهووس (CSV)", type=['csv'])
+        st.divider()
+        competitor_files = st.file_uploader("ملفات المنافسين (CSV)", type=['csv'], accept_multiple_files=True)
+        
+        st.divider()
+        if st.button("🚀 بدء التحليل الشامل", type="primary", use_container_width=True, disabled=st.session_state.analysis_running):
+            if not mahwous_file or not competitor_files:
+                st.error("الرجاء رفع كافة الملفات المطلوبة.")
+            else:
+                st.session_state.analysis_results = []
+                st.session_state.processed_count = 0
+                st.session_state.ignore_list = set()
+                st.session_state.analysis_running = True
+                
+                # تحميل البيانات
+                m_df = load_mahwous_store_data(mahwous_file)
+                c_data = {f.name: load_competitor_data(f) for f in competitor_files}
+                
+                # بدء المعالجة في الخلفية
+                start_background_analysis(m_df, c_data)
+                st.rerun()
+
+        if st.session_state.analysis_running:
+            if st.button("🛑 إيقاف المعالجة", type="secondary", use_container_width=True):
+                st.session_state.analysis_running = False
+                st.rerun()
+
+    # شريط التقدم اللحظي
+    if st.session_state.analysis_running:
+        progress_container = st.container()
+        with progress_container:
+            total = st.session_state.total_count
+            current = st.session_state.processed_count
+            if total > 0:
+                pct = min(current / total, 1.0)
+                st.progress(pct, text=f"جاري المعالجة: {current} / {total} (**{pct*100:.1f}%**)")
+            else:
+                st.progress(0, text="جاري تحضير البيانات...")
+            time.sleep(1)
+            st.rerun()
+
+    # عرض النتائج
+    if st.session_state.analysis_results:
+        results = st.session_state.analysis_results
+        
+        green_list = [r for r in results if r.get('confidence_level') == 'green']
+        yellow_list = [r for r in results if r.get('confidence_level') == 'yellow']
+        red_list = [r for r in results if r.get('confidence_level') == 'red']
+
+        st.subheader(f"📊 إجمالي المكتشف: {len(results)}")
+        
+        tab1, tab2, tab3 = st.tabs([
+            f"🟢 مفقود مؤكد ({len(green_list)})", 
+            f"🟡 يحتاج مراجعة ({len(yellow_list)})", 
+            f"🔴 مكرر (>90%) ({len(red_list)})"
+        ])
+
+        with tab1:
+            render_products("green", green_list)
+        with tab2:
+            render_products("yellow", yellow_list)
+        with tab3:
+            render_products("red", red_list)
+
+if __name__ == "__main__":
+    main()
