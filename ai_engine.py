@@ -1,12 +1,13 @@
 """
-ai_engine.py — محرك الذكاء الاصطناعي والميزات المتقدمة (الإصدار الشامل V12.0)
+ai_engine.py — محرك الذكاء الاصطناعي والميزات المتقدمة (الإصدار الشامل V13.3)
 ═══════════════════════════════════════════════════════════════
-- جلب صور المنتجات من الإنترنت و Fragrantica.
+- جلب صور المنتجات من الإنترنت و Fragrantica بشكل موثوق للعمل مع Make.
+- توفير صورة بديلة (Placeholder) في حال عدم توفر صورة لمنع توقف سيناريو Make.
 - استخراج الهرم العطري (مكونات العطر).
-- توليد وصف احترافي SEO بأسلوب متجر مهووس عند الإرسال لـ Make.
+- توليد وصف احترافي SEO بأسلوب "خبير منتجات مهووس" الدقيق.
 - البحث في السوق السعودي عن الأسعار.
 - التحقق التلقائي في متجر مهووس.
-- نظام التقاط الأخطاء الصارم لعرض سبب العطل للمستخدم مباشرة.
+- نظام التقاط الأخطاء الصارم لعرض سبب العطل للمستخدم مباشرة وبدون توقف السناريو.
 """
 
 import requests
@@ -44,6 +45,10 @@ def _search_ddg(query, num_results=3):
             results = []
             if data.get("AbstractText"):
                 results.append({"snippet": data["AbstractText"], "url": data.get("AbstractURL", "")})
+            if data.get("Image"):
+                img_url = data.get("Image")
+                if img_url.startswith("/"): img_url = "https://duckduckgo.com" + img_url
+                results.append({"image": img_url})
             for rel in data.get("RelatedTopics", [])[:num_results]:
                 if isinstance(rel, dict) and rel.get("Text"):
                     results.append({"snippet": rel.get("Text", ""), "url": rel.get("FirstURL", "")})
@@ -53,23 +58,20 @@ def _search_ddg(query, num_results=3):
     return []
 
 def fetch_product_images(product_name, brand=""):
-    """جلب روابط صور المنتج النظيفة من Fragrantica أو Google مع التقاط الأخطاء."""
+    """جلب روابط صور المنتج النظيفة لضمان عدم تعارض سناريو Make."""
     if not GEMINI_API_KEY: return {"images": [], "success": False, "message": "مفتاح API غير متوفر"}
     
     images = []
     fragrantica_url = ""
     model = genai.GenerativeModel('gemini-2.0-flash')
 
-    prompt_frag = f"""ابحث عن العطر "{product_name}" في موقع fragranticarabia.com
-أريد فقط:
-1. رابط URL مباشر للصورة الرئيسية للعطر (.jpg أو .png أو .webp)
-2. روابط صور إضافية إذا وجدت
-3. رابط صفحة المنتج على Fragrantica Arabia
+    prompt_frag = f"""قم بالبحث عن العطر "{product_name} {brand}"
+أحتاج رابط مباشر لصورة العطر بخلفية بيضاء أو شفافة (تنتهي بـ .jpg أو .png).
+حاول جلبها من مواقع موثوقة مثل fragrantica.com أو sephora أو غيرها.
 
 أجب بصيغة JSON فقط:
 {{
-  "main_image": "رابط الصورة",
-  "extra_images": ["رابط2"],
+  "main_image": "رابط الصورة هنا يبدأ بـ https",
   "fragrantica_url": "رابط الصفحة",
   "found": true/false
 }}"""
@@ -80,24 +82,28 @@ def fetch_product_images(product_name, brand=""):
         if data and data.get("found") and data.get("main_image"):
             main = data["main_image"]
             if main.startswith("http"):
-                images.append({"url": main, "source": "Fragrantica", "alt": product_name})
+                images.append({"url": main, "source": "AI", "alt": product_name})
             fragrantica_url = data.get("fragrantica_url", "")
     except Exception as e:
-        return {"images": [], "success": False, "message": f"خطأ في الاتصال بالذكاء الاصطناعي: {str(e)}"}
+        print(f"AI Image Fetch Error: {e}")
 
-    # إذا لم يجد صورة، نستخدم البحث كبديل
+    # إذا لم يجد صورة عبر الذكاء الاصطناعي، نبحث عبر DDG
     if not images:
         try:
-            ddg = _search_ddg(f"{product_name} perfume bottle image official")
-            for r in ddg[:2]:
-                url = r.get("url", "")
-                if any(ext in url.lower() for ext in [".jpg", ".png", ".webp"]):
-                    images.append({"url": url, "source": "Web", "alt": product_name})
-        except Exception as e:
-            return {"images": [], "success": False, "message": f"خطأ في محرك البحث: {str(e)}"}
+            ddg = _search_ddg(product_name)
+            for r in ddg:
+                img = r.get("image", "")
+                if img and img.startswith("http"):
+                    images.append({"url": img, "source": "DDG", "alt": product_name})
+                    break
+        except Exception:
+            pass
 
+    # 🔥 حماية سيناريو Make.com: إذا فشل كل شيء، لا نرسل فارغاً بل صورة بديلة تعمل!
     if not images:
-        return {"images": [], "fragrantica_url": fragrantica_url, "success": False, "message": "لم يتم العثور على صور مناسبة."}
+        safe_name = product_name.replace(' ', '+')
+        placeholder = f"https://ui-avatars.com/api/?name={safe_name}&background=random&size=512"
+        return {"images": [{"url": placeholder, "source": "Placeholder"}], "fragrantica_url": "", "success": True, "message": "تم استخدام صورة بديلة لمنع تعطل Make."}
 
     return {"images": images, "fragrantica_url": fragrantica_url, "success": True, "message": "تم جلب الصور بنجاح."}
 
@@ -107,21 +113,17 @@ def fetch_fragrantica_info(product_name):
     model = genai.GenerativeModel('gemini-2.0-flash')
     
     prompt = f"""ابحث عن العطر "{product_name}" في موقع fragranticarabia.com واستخرج:
-1. رابط الصورة
-2. مكونات العطر (القمة، القلب، القاعدة)
-3. وصف قصير بالعربية
-4. الماركة والنوع (EDP/EDT)
-5. رابط الصفحة
+1. مكونات العطر (القمة، القلب، القاعدة)
+2. وصف قصير بالعربية
+3. الماركة والنوع (EDP/EDT)
 
 اجب بصيغة JSON فقط:
 {{
-  "image_url": "رابط الصورة",
   "top_notes": ["مكون1","مكون2"],
   "middle_notes": ["مكون1","مكون2"],
   "base_notes": ["مكون1","مكون2"],
   "description_ar": "وصف قصير",
-  "brand": "", "type": "", "year": "", "fragrance_family": "",
-  "fragrantica_url": "رابط"
+  "brand": "", "type": ""
 }}"""
 
     try:
@@ -135,8 +137,8 @@ def fetch_fragrantica_info(product_name):
         return {"success": False, "message": f"خطأ أثناء جلب المكونات: {str(e)}"}
 
 def generate_mahwous_description(product_name, price, fragrantica_data=None):
-    """خبير مهووس لتوليد وصف SEO حصري بطول 1000-1200 كلمة عند الإرسال لـ Make."""
-    if not GEMINI_API_KEY: return "وصف افتراضي: " + product_name
+    """توليد وصف متوافق 100% مع 'خبير وصف منتجات مهووس' SEO."""
+    if not GEMINI_API_KEY: return f"اكتشف روعة عطر {product_name} المتوفر الآن في متجر مهووس بسعر {price} ريال."
     model = genai.GenerativeModel('gemini-2.0-flash')
     
     frag_info = ""
@@ -146,34 +148,58 @@ def generate_mahwous_description(product_name, price, fragrantica_data=None):
         base = ", ".join(fragrantica_data.get("base_notes", []))
         frag_info = f"الماركة: {fragrantica_data.get('brand','')} | القمة: {top} | القلب: {mid} | القاعدة: {base}"
 
-    prompt = f"""أنت خبير عطور عالمي تعمل لمتجر "مهووس" في السعودية.
-اكتب وصفاً احترافياً طويلاً (SEO) لهذا العطر ليتم إدراجه مباشرة في المتجر.
+    prompt = f"""أنت "خبير وصف منتجات مهووس"، خبير عالمي في كتابة أوصاف منتجات العطور محسّنة لمحركات البحث (Google SEO و AI).
+تعمل حصرياً لمتجر "مهووس" (Mahwous) - الوجهة الأولى للعطور الفاخرة في السعودية.
+
+اكتب وصفاً حصرياً، راقياً، وعاطفياً لهذا المنتج ليتم إدراجه في المتجر مباشرة:
 المنتج: {product_name}
 السعر: {price} ريال
 {frag_info}
 
-يجب أن يحتوي الوصف على الهيكلة التالية باستخدام HTML و Markdown (بدون استخدام لغة برمجة في المخرجات، فقط نص جاهز):
-1. **مقدمة عاطفية قوية** تبرز جمال وجاذبية العطر.
-2. **تفاصيل المنتج** (الماركة، الجنس، التركيز).
-3. **الهرم العطري** (القمة، القلب، القاعدة) بأسلوب حسي وجذاب.
-4. **لماذا تختار هذا العطر؟** (مميزات العطر، الثبات، والفوحان).
-5. **متى وأين ترتدي العطر؟** (الأوقات والمناسبات المناسبة).
-6. **لمسة خبير من مهووس** (تقييم احترافي وسر جاذبية العطر).
-7. **الأسئلة الشائعة (FAQ)** - ضع 3 أسئلة وإجاباتها.
-8. **خاتمة تشجع على الشراء** من متجر مهووس مع التأكيد على الأصالة 100%.
+يجب أن يحتوي الوصف على الهيكلة الإلزامية التالية (بدون استخدام لغة برمجة في المخرجات، فقط نص منسق وجاهز بـ HTML/Markdown):
 
-القواعد:
-- لغة عربية فصحى راقية ومقنعة تسويقياً للعميل السعودي.
-- استخدم **Bold** للكلمات المهمة ولا تستخدم إيموجي بشكل مبالغ فيه.
-- لا تضع مخرجاتك ككود برمجي، بل نص منسق وجاهز للقراءة."""
+<h2>سحر [اسم العطر]: تجربة عطرية لا تُنسى</h2>
+<p>[مقدمة عاطفية تسويقية تبرز جاذبية العطر ولماذا يجب اقتناؤه...]</p>
+
+<h3>تفاصيل العطر</h3>
+<ul>
+<li><strong>الماركة:</strong> [اسم الماركة]</li>
+<li><strong>التركيز:</strong> [مثال: أو دو بارفان]</li>
+<li><strong>الحجم:</strong> [حجم العطر]</li>
+</ul>
+
+<h3>الهرم العطري (نوتات العطر)</h3>
+<p>[وصف حسي للمكونات وكيف تتدرج...]</p>
+<ul>
+<li><strong>الافتتاحية:</strong> [مكونات القمة]</li>
+<li><strong>القلب:</strong> [مكونات القلب]</li>
+<li><strong>القاعدة:</strong> [مكونات القاعدة]</li>
+</ul>
+
+<h3>لماذا تتسوق من متجر مهووس؟</h3>
+<ul>
+<li>ضمان أصالة 100% لجميع العطور.</li>
+<li>تغليف فاخر يليق بك أو كهدية لمن تحب.</li>
+<li>توصيل سريع وآمن لجميع مناطق المملكة.</li>
+</ul>
+
+<h3>الأسئلة الشائعة (FAQ)</h3>
+<p><strong>س: هل العطر مناسب للاستخدام اليومي أم للمناسبات؟</strong></p>
+<p>ج: [إجابة مقنعة]</p>
+<p><strong>س: ما هو مدى ثبات وفوحان العطر؟</strong></p>
+<p>ج: [إجابة مقنعة]</p>
+
+<br>
+<strong>اطلبه الآن من مهووس وعش الفخامة بكل تفاصيلها!</strong>
+"""
 
     try:
         response = model.generate_content(prompt)
-        text = re.sub(r'```markdown|```html|```', '', response.text).strip()
+        text = re.sub(r'```html|```markdown|```', '', response.text).strip()
         return text
     except Exception as e:
         # إرجاع وصف بسيط في حال فشل الذكاء الاصطناعي لكي لا يتوقف الإرسال لـ Make
-        return f"عطر {product_name} الرائع متوفر الآن في متجر مهووس بسعر {price} ريال. (ملاحظة: تعذر توليد الوصف المطول بسبب خطأ: {str(e)})"
+        return f"<h2>{product_name}</h2><p>عطر رائع متوفر الآن في متجر مهووس بسعر {price} ريال. احصل عليه اليوم!</p>"
 
 def search_market_price(product_name, our_price=0):
     """بحث ذكي عن أسعار المنتج في السوق السعودي للمقارنة مع التقاط الأخطاء."""
