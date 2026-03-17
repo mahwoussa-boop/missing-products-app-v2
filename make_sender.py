@@ -1,8 +1,10 @@
-"""make_sender.py v14.120 — مدير الإرسال الهجين الصارم (AI + Python)
+"""
+make_sender.py - إرسال المنتجات إلى Make.com Webhook
 ═══════════════════════════════════════════════════════════════
-- إصلاح وتشفير روابط الصور برمجياً (Python) لضمان توافق ميك وسلة 100%.
-- دالة prepare_final_payload لضمان جودة الوصف والصور قبل الإرسال.
-- معالجة الروابط التي تحتوي على حروف عربية أو رموز معقدة باستخدام urllib.parse.
+- يرسل الحقول بالأسماء العربية المتوافقة مع Blueprint v5
+- الحقول المرسلة: أسم المنتج، سعر المنتج، الوصف، صورة المنتج، إلخ
+- يتعامل مع الصور وتنظيف الروابط برمجياً
+- يبني وصف المنتج وفق أسلوب مهووس إذا كان فارغاً
 """
 
 import requests
@@ -41,21 +43,6 @@ MAHWOUS_CATEGORIES = _load_mahwous_categories()
 def _smart_categorize(product_name: str, brand: str = '') -> list:
     """
     التصنيف الذكي للمنتج: يُحدد 1-3 تصنيفات مناسبة بناءً على اسم المنتج.
-    القواعد:
-    - تستر → عطور التستر + (رجالية/نسائية)
-    - عطر رجالي → عطور رجالية + العطور
-    - عطر نسائي → عطور نسائية + العطور
-    - مجموعة/طقم → مجموعات وأطقم هدايا + (رجالية/نسائية)
-    - بخور/عود → العود و البخور
-    - مكياج → المكياج + الجمال و العناية
-    - عناية → الجمال و العناية
-    - جل/كريم/لوشن/بودر → للشعر والجسم
-    - عينة/ميني → عطور عينات ميني
-    - نيش → عطور النيش + (رجالية/نسائية)
-    - أطفال → عطور الأطفال
-    - بديل → بدائل العطور
-    - فرموني → عطور فرمونية
-    - افتراضي → العطور
     """
     name_lower = product_name.lower()
     cats = []
@@ -64,7 +51,6 @@ def _smart_categorize(product_name: str, brand: str = '') -> list:
     is_female = any(w in name_lower for w in ['نسائي', 'نسائية', 'women', 'woman', 'femme', 'pour femme', 'her', 'lady', 'ladies'])
     is_male   = any(w in name_lower for w in ['رجالي', 'رجالية', 'men', 'man', 'homme', 'pour homme', 'him', 'his'])
 
-    # --- قواعد التصنيف الذكي ---
     if any(w in name_lower for w in ['تستر', 'tester']):
         cats.append('عطور التستر')
         if is_female: cats.append('عطور التستر نسائية')
@@ -118,7 +104,6 @@ def _smart_categorize(product_name: str, brand: str = '') -> list:
         cats.append('العناية')
 
     else:
-        # عطر عام - تحديد الجنس
         cats.append('العطور')
         if is_female: cats.append('عطور نسائية')
         elif is_male: cats.append('عطور رجالية')
@@ -126,10 +111,8 @@ def _smart_categorize(product_name: str, brand: str = '') -> list:
     # التحقق من وجود التصنيفات في قائمة مهووس المعتمدة
     valid_cat_names = {c['name'] for c in MAHWOUS_CATEGORIES}
     validated = [c for c in cats if c in valid_cat_names]
-    # إذا لم يُطابق أي تصنيف، استخدم "العطور" كافتراضي
     if not validated:
         validated = ['العطور']
-    # حد أقصى 3 تصنيفات
     return validated[:3]
 
 # ─── تحميل قائمة ماركات مهووس المعتمدة (من ملف CSV) ───
@@ -170,10 +153,8 @@ def _resolve_brand(brand_input: str) -> str:
     """
     if not brand_input: return ''
     key = brand_input.strip().lower()
-    # بحث مباشر
     if key in MAHWOUS_BRANDS:
         return MAHWOUS_BRANDS[key]
-    # بحث جزئي (إذا كان الاسم الإنجليزي جزءاً من مفتاح الماركة)
     for k, v in MAHWOUS_BRANDS.items():
         if key in k or k in key:
             return v
@@ -187,29 +168,22 @@ WEBHOOK_URL = os.environ.get(
 
 def _clean_url_for_make(url: str) -> str:
     """
-    تنظيف وإصلاح روابط الصور برمجياً (Python) لضمان عملها في سلة و Make.
-    تتعامل مع الروابط التي تحتوي على حروف عربية أو رموز معقدة.
+    تنظيف وإصلاح روابط الصور برمجياً لضمان عملها في سلة و Make.
     """
     if not url: return ""
     url = str(url).strip()
     
-    # 1. إصلاح الروابط التي لا تحتوي على بروتوكول
     if url.startswith("//"): 
         url = "https:" + url
         
     try:
-        # 2. فك التشفير أولاً لتجنب التشفير المزدوج
         url = urllib.parse.unquote(url)
         
-        # 3. معالجة روابط CDN سلة (تحويل webp وتنظيف المسارات)
         if "cdn.salla.sa" in url:
             url = re.sub(r'/cdn-cgi/image/[^/]+/', '/', url)
             
-        # 4. تحليل الرابط وإعادة تشفيره بشكل آمن (خصوصاً المسار الذي قد يحتوي على حروف عربية)
         parsed = urllib.parse.urlparse(url)
-        # تشفير المسار (Path) فقط لأنه المكان الأكثر عرضة للحروف العربية والمسافات
         clean_path = urllib.parse.quote(parsed.path, safe="/%")
-        # تشفير الاستعلام (Query) بشكل آمن
         clean_query = urllib.parse.quote(parsed.query, safe="=&%")
         
         clean_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, clean_path, parsed.params, clean_query, parsed.fragment))
@@ -219,100 +193,84 @@ def _clean_url_for_make(url: str) -> str:
 
 def _build_seo_fields(name: str, brand: str, category: str = 'عطور') -> dict:
     """
-    بناء حقول SEO الكاملة وفق معايير سلة:
-    - عنوان صفحة المنتج (Page Title)
-    - رابط صفحة المنتج (SEO Page URL)
-    - وصف صفحة المنتج (Page Description)
+    بناء حقول SEO الكاملة وفق معايير سلة.
     """
-    # تنظيف الاسم من الأحرف الخاصة لبناء الـ Slug
-    slug_name = re.sub(r'[^\u0600-\u06FFa-zA-Z0-9\s-]', '', name).strip()
-    slug_name = re.sub(r'\s+', '-', slug_name).lower()
-    slug_brand = re.sub(r'[^\u0600-\u06FFa-zA-Z0-9\s-]', '', brand).strip()
-    slug_brand = re.sub(r'\s+', '-', slug_brand).lower()
-    slug_cat = re.sub(r'[^\u0600-\u06FFa-zA-Z0-9\s-]', '', category).strip()
-    slug_cat = re.sub(r'\s+', '-', slug_cat).lower()
-
-    # Page Title: اسم المنتج : التصنيف : الماركة
-    page_title = f"{name} : {category} : {brand}" if brand else f"{name} : {category}"
-
-    # SEO Page URL: اسم-المنتج/تصنيف/ماركة (slug)
     if brand:
-        seo_url = f"{slug_name}/{slug_cat}/{slug_brand}"
-    else:
-        seo_url = f"{slug_name}/{slug_cat}"
-
-    # Page Description: وصف مختصر وفق معايير سلة (150-160 حرف)
-    if brand:
+        page_title = f"{name} : {category} : {brand}"
         page_desc = f"اشتري {name} من {brand} بأفضل سعر في متجر مهووس للعطور الفاخرة. تسوق الآن وتمتع بتجربة عطرية استثنائية مع ضمان الأصالة والجودة."
     else:
+        page_title = f"{name} : {category}"
         page_desc = f"اشتري {name} بأفضل سعر في متجر مهووس للعطور الفاخرة. تسوق الآن وتمتع بتجربة عطرية استثنائية مع ضمان الأصالة والجودة."
 
-    # اقتصار الوصف على 160 حرف
     if len(page_desc) > 160:
         page_desc = page_desc[:157] + '...'
 
     return {
         'عنوان الصفحة': page_title,
-        'رابط الصفحة SEO': seo_url,
         'وصف الصفحة': page_desc,
     }
 
+def _build_description(name: str, brand: str, price: float) -> str:
+    """
+    بناء وصف المنتج وفق أسلوب مهووس.
+    """
+    brand_text = brand if brand else 'ماركة عالمية'
+    desc = f"""<h2>{name}</h2>
+<p>اكتشف الفخامة مع <strong>{name}</strong> من <strong>{brand_text}</strong>، متوفر الآن في متجر مهووس بسعر <strong>{int(price)} ريال سعودي</strong>.</p>
+<p>يتميز هذا العطر بتركيبة فريدة تجمع بين الأناقة والجودة العالية، ليمنحك تجربة عطرية لا تُنسى طوال اليوم.</p>
+<p>لمشاهدة المزيد من <a href="https://mahwous.com/tags/perfumes">العطور الفاخرة</a> أو استكشاف <a href="https://mahwous.com/brands">أشهر الماركات</a>، تفضل بزيارة متجرنا.</p>"""
+    return desc
+
 def prepare_final_payload(p: Dict[str, Any]) -> Dict[str, Any]:
     """
-    تجهيز الـ Payload النهائي للمنتج وضمان جودة الوصف والصور برمجياً.
+    تجهيز الـ Payload النهائي للمنتج.
+    يرسل الحقول بالأسماء العربية المتوافقة مع Blueprint v5.
     """
+    # استخراج البيانات الأساسية
     name = str(p.get("product_name", p.get("name", ""))).strip()
-    price = p.get("price", 0)
     brand_raw = str(p.get("brand", "")).strip()
-    # ربط الماركة من قائمة مهووس المعتمدة فقط - تجاهل الماركات غير المعتمدة
     brand = _resolve_brand(brand_raw)
     
     try:
-        price = float(price)
+        price = float(p.get("price", 0))
     except (ValueError, TypeError):
         price = 0.0
 
-    # بناء حقول SEO
-    seo = _build_seo_fields(name, brand)
-
-    # التصنيف الذكي (1-3 تصنيفات حسب نوع المنتج)
+    # التصنيف الذكي
     categories = _smart_categorize(name, brand_raw)
+    category_name = categories[0] if categories else 'العطور'
 
-    # بناء الهيكلة بأسماء إنجليزية فقط لضمان التوافق مع Blueprint في Make
+    # بناء حقول SEO
+    seo = _build_seo_fields(name, brand, category_name)
+
+    # الوصف
+    description = str(p.get("description", "")).strip()
+    if not description:
+        description = _build_description(name, brand, price)
+
+    # ─── بناء الـ Payload بالأسماء العربية المتوافقة مع Blueprint v5 ───
     item = {
-        # حقول إنجليزية أساسية (تتوافق مع Blueprint النهائي)
-        "product_name": name,
-        "product_price": price,
-        "product_weight": 1,
-        "cost_price": 0,
-        "sale_price": 0,
-        "brand_name": brand if brand else brand_raw,  # إرسال الاسم الخام إذا لم يكن في قائمة مهووس
-        "category_name": categories[0] if categories else 'العطور',
-        "product_description": str(p.get("description", "")).strip(),
-        "product_image": "",
-        "product_sku": str(p.get("sku", "")).strip(),
-        "product_id": str(p.get("product_id", "")).strip(),
-        "metadata_title": seo["عنوان الصفحة"],
-        "metadata_description": seo["وصف الصفحة"],
-        # حقول عربية إضافية للمرجعية (لا تؤثر على Make)
+        # الحقول الأساسية (عربية - تتوافق مع Blueprint v5 mapper)
         "أسم المنتج": name,
         "سعر المنتج": price,
-        "الوصف": str(p.get("description", "")).strip(),
+        "الوصف": description,
+        "رمز المنتج sku": str(p.get("sku", "")).strip(),
+        "الوزن": 1,
+        "سعر التكلفة": 0,
+        "السعر المخفض": 0,
+        # الصورة (ستُملأ لاحقاً)
+        "صورة المنتج": "",
+        # SEO
+        "metadata_title": seo["عنوان الصفحة"],
+        "metadata_description": seo["وصف الصفحة"],
+        # التصنيف والماركة (إنجليزية لأن Salla يحتاج ID وليس نص)
+        "category_name": category_name,
+        "brand_name": brand if brand else "",
+        # حقل مرجعي
+        "product_id": str(p.get("product_id", "")).strip(),
     }
-    
-    # 1. التحقق من الوصف (إذا كان فارغاً، يتم إنشاؤه برمجياً فوراً)
-    if not item["product_description"]:
-        # حقن الروابط الثابتة لمهووس برمجياً في حال عدم توفر وصف
-        desc = f"""
-        <h2>{name}</h2>
-        <p>اكتشف الفخامة مع <strong>{name}</strong> من {brand if brand else 'ماركة عالمية'}، متوفر الآن في متجر مهووس بسعر {price} ريال سعودي.</p>
-        <p>لمشاهدة المزيد من <a href="https://mahwous.com/tags/perfumes">العطور الفاخرة</a> أو استكشاف <a href="https://mahwous.com/brands">أشهر الماركات</a>، تفضل بزيارة متجرنا.</p>
-        """
-        item["product_description"] = desc
-        item["الوصف"] = desc
-    
-    # 2. التحقق من الصور وإصلاحها برمجياً (Python URL Fix)
-    # الأولوية: all_images > image_url > competitor_image (الصورة المباشرة من ملف المنافس)
+
+    # ─── معالجة الصور ───
     all_images = p.get("all_images", [])
     if not all_images and p.get("image_url"):
         all_images = [p.get("image_url")]
@@ -322,23 +280,23 @@ def prepare_final_payload(p: Dict[str, Any]) -> Dict[str, Any]:
     cleaned_images = []
     for img_url in all_images:
         if img_url:
-            cleaned_images.append(_clean_url_for_make(str(img_url)))
+            cleaned = _clean_url_for_make(str(img_url))
+            if cleaned:
+                cleaned_images.append(cleaned)
     
     if cleaned_images:
-        item["product_image"] = cleaned_images[0]
         item["صورة المنتج"] = cleaned_images[0]
     else:
-        # صورة بديلة في حال عدم توفر أي صورة
+        # صورة بديلة إذا لم تتوفر أي صورة
         safe_name = urllib.parse.quote(name)
-        fallback_img = f"https://ui-avatars.com/api/?name={safe_name}&background=random&size=512"
-        item["product_image"] = fallback_img
-        item["صورة المنتج"] = fallback_img
+        item["صورة المنتج"] = f"https://ui-avatars.com/api/?name={safe_name}&background=random&size=512"
 
     return item
 
 def send_products_to_make(products: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     إرسال المنتجات لـ Make بعد تجهيزها عبر prepare_final_payload.
+    كل منتج يُرسل في طلب HTTP منفصل مغلف داخل {"data": [item]}
     """
     if not products:
         return {"success": False, "message": "❌ لا توجد بيانات للإرسال"}
@@ -346,14 +304,12 @@ def send_products_to_make(products: List[Dict[str, Any]]) -> Dict[str, Any]:
     formatted_products = []
     for p in products:
         item = prepare_final_payload(p)
-        if item["product_name"] and item["product_price"] > 0:
+        if item["أسم المنتج"] and item["سعر المنتج"] > 0:
             formatted_products.append(item)
 
     if not formatted_products:
         return {"success": False, "message": "❌ لم يتم العثور على منتجات صالحة للإرسال"}
 
-    # إرسال كل منتج في طلب HTTP منفصل مغلف داخل {"data": [item]}
-    # الـ Iterator في Make يبحث عن Array باسم "data" → كل طلب يحتوي على منتج واحد
     sent_count = 0
     failed_count = 0
     errors = []
