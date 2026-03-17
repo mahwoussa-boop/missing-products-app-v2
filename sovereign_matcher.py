@@ -1,9 +1,10 @@
 """
 sovereign_matcher.py — محرك المطابقة السيادي لمتجر مهووس
 ═══════════════════════════════════════════════════════════════
-v7.5 — الإصلاح النهائي الشامل (Anti-Crash)
+v8.0 — الإصلاح النهائي الشامل (Anti-Crash + Threading)
 - معالجة الانهيار (ValueError: empty vocabulary).
 - حماية فولاذية للبيانات الفارغة أو الملفات التي لا تحتوي على أسماء.
+- دعم المهام في الخلفية (Threading) لضمان عمل شريط التقدم بدون تجميد الواجهة.
 """
 
 import re
@@ -18,6 +19,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from typing import List, Dict, Any, Tuple, Optional
 from datetime import datetime
 import threading
+from streamlit.runtime.scriptrunner import add_script_run_ctx
 
 from config import GEMINI_API_KEY, SYNONYMS, REJECT_KEYWORDS, TESTER_KEYWORDS, SET_KEYWORDS
 
@@ -197,8 +199,34 @@ async def ai_verify_match(comp_name: str, match_name: str) -> Dict:
     except:
         return {"is_match": False, "reason": "AI Error"}
 
+def _run_analysis_thread(mahwous_df, competitor_data, matcher):
+    """دالة مساعدة تعمل في الخلفية لتنفيذ التحليل دون تجميد الواجهة"""
+    results = []
+    for comp_file, df in competitor_data.items():
+        if df.empty: continue
+        
+        for _, row in df.iterrows():
+            if not st.session_state.analysis_running: 
+                break # التوقف الفوري إذا طلب المستخدم
+            
+            prod_name = str(row.get('product_name', 'منتج_غير_معروف'))
+            match_res = matcher.find_best_match(prod_name)
+            
+            results.append({**row.to_dict(), "competitor_name": comp_file, **match_res})
+            
+            # تحديث العداد
+            st.session_state.processed_count += 1
+            
+            # تحديث النتائج المؤقتة كل 10 منتجات لتسريع الواجهة
+            if st.session_state.processed_count % 10 == 0:
+                st.session_state.analysis_results = results
+                
+    st.session_state.analysis_results = results
+    st.session_state.analysis_running = False
+    st.session_state.needs_rerun = True
+
 def start_sovereign_analysis(mahwous_df, competitor_data):
-    """بدء عملية التحليل السيادي."""
+    """بدء عملية التحليل السيادي (تعمل الآن في الخلفية لتفعيل شريط التقدم)."""
     try:
         matcher = SovereignMatcher(mahwous_df)
     except Exception as e:
@@ -206,29 +234,13 @@ def start_sovereign_analysis(mahwous_df, competitor_data):
         st.session_state.analysis_running = False
         return
 
-    results = []
     total = sum(len(df) for df in competitor_data.values())
     st.session_state.total_count = total
     st.session_state.processed_count = 0
     st.session_state.analysis_results = []
     st.session_state.analysis_running = True
 
-    for comp_file, df in competitor_data.items():
-        if df.empty: continue
-        
-        for _, row in df.iterrows():
-            if not st.session_state.analysis_running: break
-            
-            prod_name = str(row.get('product_name', 'منتج_غير_معروف'))
-            match_res = matcher.find_best_match(prod_name)
-            
-            results.append({**row.to_dict(), "competitor_name": comp_file, **match_res})
-            
-            st.session_state.processed_count += 1
-            # تحديث الواجهة كل 10 منتجات لتسريع الأداء
-            if st.session_state.processed_count % 10 == 0:
-                st.session_state.analysis_results = results
-                
-    st.session_state.analysis_results = results
-    st.session_state.analysis_running = False
-    st.session_state.needs_rerun = True
+    # تشغيل التحليل في Thread منفصل لكي لا تتجمد شاشة Streamlit
+    thread = threading.Thread(target=_run_analysis_thread, args=(mahwous_df, competitor_data, matcher))
+    add_script_run_ctx(thread) # ضروري لكي يتمكن الـ thread من تعديل session_state
+    thread.start()
