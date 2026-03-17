@@ -346,17 +346,19 @@ def send_products_to_make(products: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not formatted_products:
         return {"success": False, "message": "❌ لم يتم العثور على منتجات صالحة للإرسال"}
 
-    # إرسال كل منتج في طلب HTTP منفصل ليتوافق مع Iterator في Make
-    # الـ Iterator يتوقع كل منتج كـ Payload مستقل وليس مصفوفة واحدة
+    # إرسال كل منتج في طلب HTTP منفصل مغلف داخل {"data": [item]}
+    # الـ Iterator في Make يبحث عن Array باسم "data" → كل طلب يحتوي على منتج واحد
     sent_count = 0
     failed_count = 0
     errors = []
 
     for item in formatted_products:
         try:
+            # تغليف المنتج داخل مصفوفة data ليقرأها Iterator في Make
+            payload_wrapped = {"data": [item]}
             response = requests.post(
                 WEBHOOK_URL,
-                json=item,
+                json=payload_wrapped,
                 headers={"Content-Type": "application/json"},
                 timeout=30
             )
