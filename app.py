@@ -2296,41 +2296,96 @@ elif st.session_state.page == "compare":
                         store_skus = {str(v).strip().lower() for v in
                                       store_df[store_sku_col].fillna("").tolist() if str(v).strip()}
 
+                    # ── Advanced 5-Stage Comparison Engine ──
                     results = []
+                    
+                    # Pre-process store products for advanced matching
+                    store_parsed = []
+                    for idx, row in store_df.iterrows():
+                        sname = str(row.get(store_name_col, "") or "").strip()
+                        if not sname: continue
+                        attrs = extract_product_attrs(sname)
+                        store_parsed.append({
+                            "orig_name": sname,
+                            "clean_name": attrs["clean_name"],
+                            "size": attrs["size"],
+                            "type": attrs["type"],
+                            "concentration": attrs["concentration"],
+                            "sku": str(row.get(store_sku_col, "") or "").strip() if store_sku_col != NONE_C else ""
+                        })
+                    
+                    store_clean_dict = {i: p["clean_name"] for i, p in enumerate(store_parsed)}
+                    store_skus = {p["sku"].lower(): p["orig_name"] for p in store_parsed if p["sku"]}
+
                     for i, row in new_df.iterrows():
                         new_name = str(row.get(new_name_col, "") or "").strip()
-                        new_sku  = str(row.get(new_sku_col, "") or "").strip() \
-                                   if new_sku_col != NONE_C else ""
+                        new_sku  = str(row.get(new_sku_col, "") or "").strip() if new_sku_col != NONE_C else ""
+                        new_img  = str(row.get("صورة المنتج","") or "")
+                        
                         if not new_name:
                             continue
 
-                        # Check exact SKU match
+                        # Stage 1: Exact SKU Match
                         if new_sku and new_sku.lower() in store_skus:
                             results.append({
                                 "الاسم الجديد":      new_name,
                                 "SKU الجديد":        new_sku,
-                                "أقرب تطابق في المتجر": new_name,
+                                "أقرب تطابق في المتجر": store_skus[new_sku.lower()],
                                 "نسبة التشابه":      100,
                                 "الحالة":            "مكرر (SKU)",
                                 "الإجراء":           "حذف",
                                 "_idx":              i,
-                                "_img":              str(row.get("صورة المنتج","") or ""),
+                                "_img":              new_img,
                             })
                             continue
 
-                        # Find best fuzzy match
+                        # Stage 2 & 3: Advanced Attribute & Fuzzy Matching
+                        new_attrs = extract_product_attrs(new_name)
+                        new_clean = new_attrs["clean_name"]
+                        new_size  = new_attrs["size"]
+                        new_type  = new_attrs["type"]
+                        new_conc  = new_attrs["concentration"]
+                        
                         best_score = 0
                         best_match = ""
-                        new_lower  = new_name.lower()
-                        for sn in store_names:
-                            score = _fuzzy_ratio(new_lower, sn)
-                            if score > best_score:
-                                best_score = score
-                                best_match = sn
+                        best_sp = None
+                        
+                        if store_clean_dict:
+                            if HAS_RAPIDFUZZ:
+                                best = rf_process.extractOne(new_clean, store_clean_dict, scorer=rf_fuzz.token_set_ratio)
+                                if best:
+                                    _, best_score, pos = best
+                                    best_sp = store_parsed[pos]
+                                    best_match = best_sp["orig_name"]
+                            else:
+                                for idx2, clean2 in store_clean_dict.items():
+                                    s = _fuzzy_ratio(new_clean, clean2)
+                                    if s > best_score:
+                                        best_score = s
+                                        best_sp = store_parsed[idx2]
+                                        best_match = best_sp["orig_name"]
 
-                        if best_score == 100:
-                            status = "مكرر (اسم)"
-                            action = "حذف"
+                        # Stage 4: Logical Verdict based on attributes
+                        if best_score >= 90:
+                            # High text similarity - check attributes
+                            if new_type != best_sp["type"]:
+                                status = "جديد"
+                                action = "اعتماد"
+                                reason = f"نوع مختلف: {new_type} vs {best_sp['type']}"
+                                best_score -= 20 # Penalize score for display
+                            elif new_size != best_sp["size"] and new_size != 0 and best_sp["size"] != 0:
+                                status = "جديد"
+                                action = "اعتماد"
+                                reason = f"حجم مختلف: {new_size}ml vs {best_sp['size']}ml"
+                                best_score -= 15
+                            elif new_conc != best_sp["concentration"] and new_conc != "غير محدد" and best_sp["concentration"] != "غير محدد":
+                                status = "جديد"
+                                action = "اعتماد"
+                                reason = f"تركيز مختلف: {new_conc} vs {best_sp['concentration']}"
+                                best_score -= 10
+                            else:
+                                status = "مكرر (اسم وخصائص)"
+                                action = "حذف"
                         elif best_score >= sim_threshold:
                             status = "مشبوه"
                             action = "مراجعة"
@@ -2346,7 +2401,7 @@ elif st.session_state.page == "compare":
                             "الحالة":            status,
                             "الإجراء":           action,
                             "_idx":              i,
-                            "_img":              str(row.get("صورة المنتج","") or ""),
+                            "_img":              new_img,
                         })
 
                     st.session_state.cmp_results  = pd.DataFrame(results)
